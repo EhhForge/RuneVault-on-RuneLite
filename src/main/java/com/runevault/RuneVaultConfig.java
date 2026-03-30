@@ -195,6 +195,31 @@ public interface RuneVaultConfig extends Config
     }
 
     // -------------------------------------------------------------------------
+    // Privacy
+
+    @ConfigSection(
+        name = "Privacy",
+        description = "Control who can see your portfolio",
+        position = 3
+    )
+    String privacySection = "privacy";
+
+    @ConfigItem(
+        keyName = "publicProfile",
+        name = "Public Portfolio",
+        description = "Allow anyone to view your portfolio at runevault.vaultek.co/u/[username]",
+        section = privacySection,
+        position = 0
+    )
+    default boolean publicProfile()
+    {
+        return true;
+    }
+
+    @ConfigItem(keyName = "publicProfile", name = "", description = "")
+    void setPublicProfile(boolean value);
+
+    // -------------------------------------------------------------------------
     // Advanced
     // -------------------------------------------------------------------------
 

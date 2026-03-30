@@ -570,6 +570,8 @@ public class SupabaseClient
                     cachedProfileId = profileId;
                     log("Switched to profile for " + rsUsername + " (" + cachedProfileId + ")");
                 }
+                // Mark verified — this RuneLite session proves ownership of the RS account
+                markPluginVerified();
             }
             else
             {
@@ -618,6 +620,55 @@ public class SupabaseClient
         {
             log("createProfile error: " + e.getMessage());
         }
+        // New profile created by the plugin — verified by definition
+        markPluginVerified();
+    }
+
+    /**
+     * Mark this profile as plugin_verified = true.
+     * Called whenever the plugin successfully connects to an RS character's profile.
+     * This is the proof-of-ownership signal used by the public portfolio web page.
+     */
+    private void markPluginVerified()
+    {
+        if (cachedProfileId == null || !isAuthenticated()) return;
+
+        JsonObject body = new JsonObject();
+        body.addProperty("plugin_verified", true);
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId)
+            .patch(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
+            .addHeader("Prefer",        "return=minimal")
+            .build();
+
+        executeAsync(request, "markPluginVerified");
+    }
+
+    /**
+     * Set is_public on the current profile. Called when the user toggles
+     * the Public Profile switch in the RuneLite panel.
+     */
+    public void setPublicProfile(boolean isPublic)
+    {
+        if (cachedProfileId == null || !isAuthenticated()) return;
+
+        JsonObject body = new JsonObject();
+        body.addProperty("is_public", isPublic);
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId)
+            .patch(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
+            .addHeader("Prefer",        "return=minimal")
+            .build();
+
+        executeAsync(request, "setPublicProfile(" + isPublic + ")");
     }
 
     public void fetchAndCacheProfile()

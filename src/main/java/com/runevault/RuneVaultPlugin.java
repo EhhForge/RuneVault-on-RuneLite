@@ -68,7 +68,8 @@ public class RuneVaultPlugin extends Plugin
         bankTracker = new BankTracker(supabase, config, itemManager);
 
         // Build the side panel
-        panel = new RuneVaultPanel(e -> handlePanelConnect(), e -> handlePanelDisconnect(), config);
+        panel = new RuneVaultPanel(e -> handlePanelConnect(), e -> handlePanelDisconnect(), config,
+            isPublic -> linkCodePoller.execute(() -> supabase.setPublicProfile(isPublic)));
         navButton = NavigationButton.builder()
             .tooltip("Rune Vault")
             .icon(RuneVaultPanel.buildNavIcon())

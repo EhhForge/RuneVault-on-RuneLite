@@ -34,9 +34,13 @@ public class RuneVaultPanel extends PluginPanel
 
     private final RuneVaultConfig config;
 
-    RuneVaultPanel(ActionListener onConnect, ActionListener onDisconnect, RuneVaultConfig config)
+    private final java.util.function.Consumer<Boolean> onPublicToggle;
+
+    RuneVaultPanel(ActionListener onConnect, ActionListener onDisconnect, RuneVaultConfig config,
+                   java.util.function.Consumer<Boolean> onPublicToggle)
     {
-        this.config = config;
+        this.config         = config;
+        this.onPublicToggle = onPublicToggle;
 
         setLayout(new BorderLayout());
         setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -196,6 +200,27 @@ public class RuneVaultPanel extends PluginPanel
         card.add(buildToggle("Cash Stack",     config.syncCash(),            v -> config.setSyncCash(v)));
         card.add(Box.createVerticalStrut(3));
         card.add(buildToggle("Bank Scan",      config.bankScanEnabled(),     v -> config.setBankScanEnabled(v)));
+
+        // ── Privacy divider ───────────────────────────────────────────────────
+        card.add(Box.createVerticalStrut(8));
+        JSeparator sep = new JSeparator();
+        sep.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+        sep.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+        sep.setAlignmentX(LEFT_ALIGNMENT);
+        card.add(sep);
+        card.add(Box.createVerticalStrut(6));
+
+        JLabel privacyHeading = new JLabel("PRIVACY");
+        privacyHeading.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+        privacyHeading.setFont(FontManager.getRunescapeSmallFont());
+        privacyHeading.setAlignmentX(LEFT_ALIGNMENT);
+        card.add(privacyHeading);
+        card.add(Box.createVerticalStrut(4));
+
+        card.add(buildToggle("Public Portfolio", config.publicProfile(), v -> {
+            config.setPublicProfile(v);
+            if (onPublicToggle != null) onPublicToggle.accept(v);
+        }));
 
         return card;
     }
