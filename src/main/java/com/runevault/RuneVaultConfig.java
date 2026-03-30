@@ -49,6 +49,18 @@ public interface RuneVaultConfig extends Config
     @ConfigItem(keyName = "connectNow", name = "", description = "")
     void setConnectNow(boolean value);
 
+    @ConfigItem(
+        keyName = "connectionStatus",
+        name = "Status",
+        description = "Current Rune Vault connection status (read-only)",
+        section = accountSection,
+        position = 2
+    )
+    default String connectionStatus() { return "Not connected"; }
+
+    @ConfigItem(keyName = "connectionStatus", name = "", description = "")
+    void setConnectionStatus(String status);
+
     // -------------------------------------------------------------------------
     // Sync features
     // -------------------------------------------------------------------------
@@ -72,6 +84,9 @@ public interface RuneVaultConfig extends Config
         return true;
     }
 
+    @ConfigItem(keyName = "syncGeTrades", name = "", description = "")
+    void setSyncGeTrades(boolean value);
+
     @ConfigItem(
         keyName = "trackPickups",
         name = "Track Item Pickups",
@@ -83,6 +98,9 @@ public interface RuneVaultConfig extends Config
     {
         return true;
     }
+
+    @ConfigItem(keyName = "trackPickups", name = "", description = "")
+    void setTrackPickups(boolean value);
 
     @ConfigItem(
         keyName = "trackDropsAndSales",
@@ -96,6 +114,9 @@ public interface RuneVaultConfig extends Config
         return true;
     }
 
+    @ConfigItem(keyName = "trackDropsAndSales", name = "", description = "")
+    void setTrackDropsAndSales(boolean value);
+
     @ConfigItem(
         keyName = "syncCash",
         name = "Sync Cash Stack",
@@ -107,6 +128,9 @@ public interface RuneVaultConfig extends Config
     {
         return true;
     }
+
+    @ConfigItem(keyName = "syncCash", name = "", description = "")
+    void setSyncCash(boolean value);
 
     // -------------------------------------------------------------------------
     // Bank scanning
@@ -130,6 +154,9 @@ public interface RuneVaultConfig extends Config
     {
         return false;
     }
+
+    @ConfigItem(keyName = "bankScanEnabled", name = "", description = "")
+    void setBankScanEnabled(boolean value);
 
     @ConfigItem(
         keyName = "bankScanMode",

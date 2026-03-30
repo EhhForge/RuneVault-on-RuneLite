@@ -182,6 +182,73 @@ public class SupabaseClient
         return cachedProfileId != null;
     }
 
+    /** Clear all stored credentials and cached state. */
+    public void disconnect()
+    {
+        setPluginActive(false); // tell the app before wiping the token
+        clearStoredCredentials();
+        config.setLinkCode("");
+        config.setConnectionStatus("Not connected");
+        log("Disconnected from Rune Vault.");
+    }
+
+    /**
+     * Set plugin_active on the profile row. Called on connect (true) and disconnect (false).
+     * Synchronous so the flag is written before credentials are cleared on disconnect.
+     */
+    public void setPluginActive(boolean active)
+    {
+        if (cachedProfileId == null || !isAuthenticated()) return;
+
+        JsonObject body = new JsonObject();
+        body.addProperty("plugin_active", active);
+        if (active) body.addProperty("plugin_last_seen",
+            java.time.Instant.now().toString());
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId)
+            .patch(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
+            .addHeader("Prefer",        "return=minimal")
+            .build();
+
+        try (Response response = httpClient.newCall(request).execute())
+        {
+            if (!response.isSuccessful())
+                log("setPluginActive(" + active + ") failed: HTTP " + response.code());
+        }
+        catch (IOException e)
+        {
+            log("setPluginActive error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Lightweight heartbeat — updates plugin_last_seen so the app can detect
+     * crashes vs explicit disconnects. Called every 2 minutes by the plugin.
+     */
+    public void sendHeartbeat()
+    {
+        if (cachedProfileId == null || !isAuthenticated()) return;
+
+        JsonObject body = new JsonObject();
+        body.addProperty("plugin_active",    true);
+        body.addProperty("plugin_last_seen", java.time.Instant.now().toString());
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId)
+            .patch(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
+            .addHeader("Prefer",        "return=minimal")
+            .build();
+
+        executeAsync(request, "heartbeat");
+    }
+
     // -------------------------------------------------------------------------
     // Portfolio items
     // -------------------------------------------------------------------------
@@ -463,6 +530,95 @@ public class SupabaseClient
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Called on GameState.LOGGED_IN with the RS character's username.
+     * Finds an existing profile whose name matches, or creates a new one.
+     * Updates cachedProfileId so all subsequent syncs target the right character.
+     */
+    public void switchProfileForUsername(String rsUsername)
+    {
+        if (cachedUserId == null || rsUsername == null || rsUsername.isEmpty()) return;
+
+        String encoded;
+        try { encoded = java.net.URLEncoder.encode(rsUsername, "UTF-8"); }
+        catch (Exception e) { encoded = rsUsername; }
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/profiles?user_id=eq." + cachedUserId
+                + "&name=eq." + encoded
+                + "&select=id,name&limit=1")
+            .get()
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .build();
+
+        try (Response response = httpClient.newCall(request).execute())
+        {
+            if (!response.isSuccessful() || response.body() == null)
+            {
+                log("switchProfile fetch failed: HTTP " + response.code());
+                return;
+            }
+
+            JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
+            if (rows.size() > 0)
+            {
+                String profileId = rows.get(0).getAsJsonObject().get("id").getAsString();
+                if (!profileId.equals(cachedProfileId))
+                {
+                    cachedProfileId = profileId;
+                    log("Switched to profile for " + rsUsername + " (" + cachedProfileId + ")");
+                }
+            }
+            else
+            {
+                log("No profile found for " + rsUsername + " — creating one.");
+                createProfileForUsername(rsUsername);
+            }
+        }
+        catch (IOException e)
+        {
+            log("switchProfile error: " + e.getMessage());
+        }
+    }
+
+    private void createProfileForUsername(String rsUsername)
+    {
+        JsonObject body = new JsonObject();
+        body.addProperty("id",      java.util.UUID.randomUUID().toString());
+        body.addProperty("user_id", cachedUserId);
+        body.addProperty("name",    rsUsername);
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/profiles")
+            .post(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
+            .addHeader("Prefer",        "return=representation")
+            .build();
+
+        try (Response response = httpClient.newCall(request).execute())
+        {
+            if (!response.isSuccessful() || response.body() == null)
+            {
+                log("createProfile failed: HTTP " + response.code());
+                return;
+            }
+
+            JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
+            if (rows.size() > 0)
+            {
+                cachedProfileId = rows.get(0).getAsJsonObject().get("id").getAsString();
+                log("Created new profile for " + rsUsername + " (" + cachedProfileId + ")");
+            }
+        }
+        catch (IOException e)
+        {
+            log("createProfile error: " + e.getMessage());
+        }
+    }
 
     public void fetchAndCacheProfile()
     {

@@ -55,14 +55,18 @@ public class GETracker
 
         int itemId   = offer.getItemId();
         int quantity = offer.getTotalQuantity();
-        int price    = offer.getPrice();
+        // Use the actual price paid (spent / traded), not the bid ceiling the player entered.
+        // offer.getPrice() is the max-buy price; offer.getSpent() is what was actually charged.
+        int price    = offer.getQuantitySold() > 0
+            ? offer.getSpent() / offer.getQuantitySold()
+            : offer.getPrice();
 
         String itemName = itemManager.getItemComposition(itemId).getName();
         String imageUrl = buildImageUrl(itemId);
 
         if (state == GrandExchangeOfferState.BOUGHT)
         {
-            log.debug("[RuneVault] GE BUY: " + quantity + "x " + itemName + " @ " + price + "gp");
+            log.debug("[RuneVault] GE BUY: " + quantity + "x " + itemName + " @ " + price + "gp (actual, bid was " + offer.getPrice() + "gp)");
             supabase.upsertItem(new PortfolioItem(itemId, itemName, quantity, price, imageUrl));
         }
         else
