@@ -2,7 +2,9 @@ package com.runevault;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
 
@@ -68,9 +70,27 @@ public class SupabaseClient
                 return false;
             }
 
-            String accessToken  = json.get("accessToken").getAsString();
-            String refreshToken = json.get("refreshToken").getAsString();
-            String userId       = json.get("userId").getAsString();
+            JsonElement accessTokenEl = json.get("accessToken");
+            if (accessTokenEl == null || accessTokenEl.isJsonNull())
+            {
+                log("Link code exchange: missing accessToken in response");
+                return false;
+            }
+            JsonElement refreshTokenEl = json.get("refreshToken");
+            if (refreshTokenEl == null || refreshTokenEl.isJsonNull())
+            {
+                log("Link code exchange: missing refreshToken in response");
+                return false;
+            }
+            JsonElement userIdEl = json.get("userId");
+            if (userIdEl == null || userIdEl.isJsonNull())
+            {
+                log("Link code exchange: missing userId in response");
+                return false;
+            }
+            String accessToken  = accessTokenEl.getAsString();
+            String refreshToken = refreshTokenEl.getAsString();
+            String userId       = userIdEl.getAsString();
             String profileId    = json.has("profileId") && !json.get("profileId").isJsonNull()
                 ? json.get("profileId").getAsString() : null;
 
@@ -157,8 +177,20 @@ public class SupabaseClient
             }
 
             JsonObject json = gson.fromJson(response.body().string(), JsonObject.class);
-            String newAccessToken  = json.get("access_token").getAsString();
-            String newRefreshToken = json.get("refresh_token").getAsString();
+            JsonElement newAccessTokenEl = json.get("access_token");
+            if (newAccessTokenEl == null || newAccessTokenEl.isJsonNull())
+            {
+                log("Token refresh: missing access_token in response");
+                return false;
+            }
+            JsonElement newRefreshTokenEl = json.get("refresh_token");
+            if (newRefreshTokenEl == null || newRefreshTokenEl.isJsonNull())
+            {
+                log("Token refresh: missing refresh_token in response");
+                return false;
+            }
+            String newAccessToken  = newAccessTokenEl.getAsString();
+            String newRefreshToken = newRefreshTokenEl.getAsString();
 
             config.setAuthToken(newAccessToken);
             config.setRefreshToken(newRefreshToken);
@@ -174,7 +206,25 @@ public class SupabaseClient
 
     public boolean isAuthenticated()
     {
-        return !config.authToken().isEmpty();
+        String token = config.authToken();
+        return !token.isEmpty() && !isTokenExpired(token);
+    }
+
+    private boolean isTokenExpired(String token)
+    {
+        try
+        {
+            String[] parts = token.split("\\.");
+            if (parts.length < 2) return true;
+            String payload = new String(java.util.Base64.getUrlDecoder().decode(parts[1]));
+            JsonObject json = JsonParser.parseString(payload).getAsJsonObject();
+            long exp = json.get("exp").getAsLong();
+            return System.currentTimeMillis() / 1000L >= exp - 30; // 30s buffer
+        }
+        catch (Exception e)
+        {
+            return true; // treat unparseable token as expired
+        }
     }
 
     public boolean hasProfile()
@@ -698,6 +748,16 @@ public class SupabaseClient
 
     public void fetchAndCacheProfile()
     {
+        fetchAndCacheProfile(0);
+    }
+
+    private void fetchAndCacheProfile(int retryCount)
+    {
+        if (retryCount >= 2)
+        {
+            log.warn("fetchAndCacheProfile: max retries reached");
+            return;
+        }
         if (cachedUserId == null) return;
 
         Request request = new Request.Builder()
@@ -723,11 +783,7 @@ public class SupabaseClient
                     return;
                 }
                 // Retry with the new token
-                request = request.newBuilder()
-                    .removeHeader("Authorization")
-                    .addHeader("Authorization", "Bearer " + config.authToken())
-                    .build();
-                fetchAndCacheProfile(); // tail-call retry with fresh token
+                fetchAndCacheProfile(retryCount + 1);
                 return;
             }
             if (!response.isSuccessful() || response.body() == null)
