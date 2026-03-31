@@ -8,7 +8,6 @@ import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.widgets.ComponentID;
 import net.runelite.client.game.ItemManager;
-import net.runelite.client.ui.overlay.OverlayManager;
 
 import javax.swing.*;
 import java.util.ArrayList;

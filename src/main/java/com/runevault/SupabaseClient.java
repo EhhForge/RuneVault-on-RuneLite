@@ -284,26 +284,29 @@ public class SupabaseClient
             @Override
             public void onResponse(Call call, Response response) throws IOException
             {
-                if (!response.isSuccessful() || response.body() == null)
-                {
-                    doUpsertItem(item, item.getQuantity(), item.getBuyPrice());
-                    return;
-                }
+                try {
+                    if (!response.isSuccessful() || response.body() == null)
+                    {
+                        doUpsertItem(item, item.getQuantity(), item.getBuyPrice());
+                        return;
+                    }
 
-                JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
-                response.close();
-                if (rows.size() == 0)
-                {
-                    doUpsertItem(item, item.getQuantity(), item.getBuyPrice());
-                }
-                else
-                {
-                    JsonObject row      = rows.get(0).getAsJsonObject();
-                    int existingQty     = row.get("quantity").getAsInt();
-                    long existingPrice  = row.get("buy_price").getAsLong();
-                    int newQty          = existingQty + item.getQuantity();
-                    long avgPrice       = (existingQty * existingPrice + (long) item.getQuantity() * item.getBuyPrice()) / newQty;
-                    doUpsertItem(item, newQty, avgPrice);
+                    JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
+                    if (rows.size() == 0)
+                    {
+                        doUpsertItem(item, item.getQuantity(), item.getBuyPrice());
+                    }
+                    else
+                    {
+                        JsonObject row      = rows.get(0).getAsJsonObject();
+                        int existingQty     = row.get("quantity").getAsInt();
+                        long existingPrice  = row.get("buy_price").getAsLong();
+                        int newQty          = existingQty + item.getQuantity();
+                        long avgPrice       = (existingQty * existingPrice + (long) item.getQuantity() * item.getBuyPrice()) / newQty;
+                        doUpsertItem(item, newQty, avgPrice);
+                    }
+                } finally {
+                    response.close();
                 }
             }
         });
@@ -370,19 +373,22 @@ public class SupabaseClient
             @Override
             public void onResponse(Call call, Response response) throws IOException
             {
-                if (!response.isSuccessful() || response.body() == null) return;
+                try {
+                    if (!response.isSuccessful() || response.body() == null) return;
 
-                JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
-                response.close();
-                if (rows.size() == 0) return;
+                    JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
+                    if (rows.size() == 0) return;
 
-                JsonObject row   = rows.get(0).getAsJsonObject();
-                String rowId     = row.get("id").getAsString();
-                int currentQty   = row.get("quantity").getAsInt();
-                int newQty       = currentQty - quantityToRemove;
+                    JsonObject row   = rows.get(0).getAsJsonObject();
+                    String rowId     = row.get("id").getAsString();
+                    int currentQty   = row.get("quantity").getAsInt();
+                    int newQty       = currentQty - quantityToRemove;
 
-                if (newQty <= 0) deleteItem(rowId);
-                else             updateQuantity(rowId, newQty);
+                    if (newQty <= 0) deleteItem(rowId);
+                    else             updateQuantity(rowId, newQty);
+                } finally {
+                    response.close();
+                }
             }
         });
     }
@@ -510,18 +516,37 @@ public class SupabaseClient
             @Override
             public void onResponse(Call call, Response response) throws IOException
             {
-                if (!response.isSuccessful() || response.body() == null) return;
-                JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
-                response.close();
-                for (int i = 0; i < rows.size(); i++)
-                {
-                    JsonObject row = rows.get(i).getAsJsonObject();
-                    int itemId     = row.get("item_id").getAsInt();
-                    if (!bankItemIds.contains(itemId))
+                try {
+                    if (!response.isSuccessful() || response.body() == null) return;
+                    JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
+
+                    java.util.List<String> missingIds = new java.util.ArrayList<>();
+                    for (int i = 0; i < rows.size(); i++)
                     {
-                        deleteItem(row.get("id").getAsString());
-                        log("Removed missing bank item: item_id=" + itemId);
+                        JsonObject row = rows.get(i).getAsJsonObject();
+                        int itemId     = row.get("item_id").getAsInt();
+                        if (!bankItemIds.contains(itemId))
+                        {
+                            missingIds.add(row.get("id").getAsString());
+                            log("Removing missing bank item: item_id=" + itemId);
+                        }
                     }
+
+                    if (!missingIds.isEmpty())
+                    {
+                        // Single batch DELETE using Supabase `in` filter
+                        String idList = String.join(",", missingIds);
+                        Request deleteRequest = new Request.Builder()
+                            .url(SUPABASE_URL + "/rest/v1/portfolio_items?id=in.(" + idList + ")")
+                            .delete()
+                            .addHeader("apikey",        ANON_KEY)
+                            .addHeader("Authorization", "Bearer " + config.authToken())
+                            .addHeader("Prefer",        "return=minimal")
+                            .build();
+                        executeAsync(deleteRequest, "removeItemsMissingFromBank(" + missingIds.size() + " items)");
+                    }
+                } finally {
+                    response.close();
                 }
             }
         });

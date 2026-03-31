@@ -199,6 +199,6 @@ public class InventoryTracker
 
     private String buildImageUrl(int itemId)
     {
-        return "https://services.runescape.com/m=itemdb_oldschool/obj_big.gif?id=" + itemId;
+        return "https://static.runelite.net/cache/item/icon/" + itemId + ".png";
     }
 }

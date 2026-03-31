@@ -164,7 +164,7 @@ public class RuneVaultPanel extends PluginPanel
         openWebBtn.setBorderPainted(true);
         openWebBtn.setAlignmentX(LEFT_ALIGNMENT);
         openWebBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
-        openWebBtn.addActionListener(e -> LinkBrowser.browse("http://runevault.vaultek.co"));
+        openWebBtn.addActionListener(e -> LinkBrowser.browse("https://runevault.vaultek.co"));
         root.add(openWebBtn);
 
         // ── Hint ─────────────────────────────────────────────────────────────

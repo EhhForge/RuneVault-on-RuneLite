@@ -21,7 +21,9 @@ import okhttp3.OkHttpClient;
 
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.inject.Inject;
 
@@ -46,11 +48,12 @@ public class RuneVaultPlugin extends Plugin
     private InventoryTracker inventoryTracker;
     private BankTracker bankTracker;
     private ScheduledExecutorService linkCodePoller;
+    private ScheduledFuture<?> linkCodePollerFuture;
 
     private RuneVaultPanel panel;
     private NavigationButton navButton;
 
-    private volatile boolean isConnecting = false;
+    private final AtomicBoolean isConnecting = new AtomicBoolean(false);
     private volatile String  lastPlayerName        = null;
     private volatile boolean playerNamePending      = false; // resolved on first GameTick
     private volatile boolean shownDisabledWarning   = false; // one-time per session
@@ -139,7 +142,7 @@ public class RuneVaultPlugin extends Plugin
         });
 
         // Poll every 3s for the Connect checkbox (single-thread executor ensures init completes first)
-        linkCodePoller.scheduleWithFixedDelay(this::checkLinkCode, 3, 3, TimeUnit.SECONDS);
+        linkCodePollerFuture = linkCodePoller.scheduleWithFixedDelay(this::checkLinkCode, 3, 3, TimeUnit.SECONDS);
 
         // Heartbeat every 2 minutes — keeps plugin_last_seen fresh so the app can
         // distinguish active (online) from crashed (stale) vs disconnected (explicit).
@@ -151,12 +154,6 @@ public class RuneVaultPlugin extends Plugin
     {
         if (!config.connectNow()) return;
         config.setConnectNow(false); // reset checkbox immediately — prevents re-trigger
-
-        if (isConnecting)
-        {
-            showChatMessage("Already connecting, please wait\u2026");
-            return;
-        }
 
         String code = config.linkCode().trim();
         if (code.length() != 6)
@@ -174,19 +171,26 @@ public class RuneVaultPlugin extends Plugin
             return;
         }
 
-        isConnecting = true;
+        if (!isConnecting.compareAndSet(false, true))
+        {
+            showChatMessage("Already connecting, please wait\u2026");
+            return;
+        }
+
         config.setConnectionStatus("Connecting\u2026");
         showChatMessage("Connecting to Rune Vault\u2026");
         log.info("[RuneVault] Connecting to Rune Vault...");
 
         boolean ok = supabase.exchangeLinkCode(code);
-        isConnecting = false;
+        isConnecting.set(false);
 
         if (ok)
         {
             config.setConnectionStatus("Connected \u2713");
             showChatMessage("Linked! Your portfolio will now sync automatically.");
             log.info("[RuneVault] Linked successfully!");
+            // Stop polling — successfully linked via checkbox path
+            if (linkCodePollerFuture != null) linkCodePollerFuture.cancel(false);
         }
         else
         {
@@ -205,28 +209,28 @@ public class RuneVaultPlugin extends Plugin
 
     private void handlePanelConnect()
     {
-        if (isConnecting) return;
+        if (!isConnecting.compareAndSet(false, true)) return;
 
         String code = panel.getCode();
         if (code.length() != 6)
         {
+            isConnecting.set(false);
             panel.setFeedback("Enter a valid 6-character code", true);
             return;
         }
         if (supabase.isAuthenticated())
         {
             // Already connected — treat as a re-link: disconnect first, then connect
-            supabase.disconnect();
+            linkCodePoller.execute(() -> supabase.disconnect());
             panel.setDisconnected();
         }
 
-        isConnecting = true;
         panel.setConnecting();
         showChatMessage("Connecting to Rune Vault\u2026");
 
         linkCodePoller.execute(() -> {
             boolean ok = supabase.exchangeLinkCode(code);
-            isConnecting = false;
+            isConnecting.set(false);
             if (ok)
             {
                 config.setConnectionStatus("Connected \u2713");
@@ -234,6 +238,8 @@ public class RuneVaultPlugin extends Plugin
                 panel.setConnected(lastPlayerName);
                 showChatMessage("Linked! Your portfolio will now sync automatically.");
                 log.info("[RuneVault] Linked successfully via panel.");
+                // Stop the link-code checkbox poller — no longer needed after successful link
+                if (linkCodePollerFuture != null) linkCodePollerFuture.cancel(false);
                 // If the player is already in-game, switch/confirm profile immediately
                 // without waiting for the next GameState.LOGGED_IN event.
                 if (lastPlayerName != null)
@@ -255,13 +261,14 @@ public class RuneVaultPlugin extends Plugin
 
     private void handlePanelDisconnect()
     {
-        supabase.disconnect();
-        isConnecting = false;
+        isConnecting.set(false);
         // Don't clear lastPlayerName — the player is still logged in, only the auth changed.
         // It will be reused immediately if the user reconnects without logging out.
         panel.setDisconnected();
         showChatMessage("Disconnected from Rune Vault.");
         log.info("[RuneVault] Disconnected via panel.");
+        // Run setPluginActive(false) + credential wipe off the EDT to avoid blocking Swing
+        linkCodePoller.execute(() -> supabase.disconnect());
     }
 
     @Override
