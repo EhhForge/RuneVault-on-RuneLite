@@ -34,6 +34,7 @@ public class GETracker
     public void onOfferChanged(GrandExchangeOfferChanged event)
     {
         if (!config.syncGeTrades()) return;
+        if (!supabase.isProfileReady()) return;
 
         int slot = event.getSlot();
         GrandExchangeOffer offer = event.getOffer();

@@ -123,6 +123,7 @@ public class InventoryTracker
 
     private void handleItemAdded(int itemId, int quantity)
     {
+        if (!supabase.isProfileReady()) return;
         // Cash: only track explicit ground pickups (pendingPickup flag set by "Take" click).
         // All other coin increases (GE collection, bank withdrawal, etc.) are handled by BankTracker.
         if (itemId == COINS_ID)
@@ -153,6 +154,7 @@ public class InventoryTracker
 
     private void handleItemRemoved(int itemId, int quantity)
     {
+        if (!supabase.isProfileReady()) return;
         // Cash: only track explicit drops. Bank deposits / spending are handled by BankTracker.
         if (itemId == COINS_ID)
         {

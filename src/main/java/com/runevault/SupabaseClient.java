@@ -26,6 +26,12 @@ public class SupabaseClient
     private String cachedProfileId = null;
     private long   cachedCashTotal = -1; // -1 = not yet known (bank not opened)
 
+    // Set to true only after switchProfileForUsername() completes for the current session.
+    // Prevents bank/inventory syncs from firing against the wrong profile during startup.
+    private volatile boolean profileReady = false;
+
+    public boolean isProfileReady() { return profileReady; }
+
     public SupabaseClient(OkHttpClient httpClient, Gson gson, RuneVaultConfig config)
     {
         this.httpClient = httpClient;
@@ -235,6 +241,7 @@ public class SupabaseClient
     /** Clear all stored credentials and cached state. */
     public void disconnect()
     {
+        profileReady = false;
         setPluginActive(false); // tell the app before wiping the token
         clearStoredCredentials();
         config.setLinkCode("");
@@ -704,6 +711,7 @@ public class SupabaseClient
                 log("No profile found for " + rsUsername + " — creating one.");
                 createProfileForUsername(rsUsername);
             }
+            profileReady = true;
         }
         catch (IOException e)
         {

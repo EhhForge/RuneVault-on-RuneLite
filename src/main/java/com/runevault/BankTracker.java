@@ -106,6 +106,11 @@ public class BankTracker
 
     private void syncItems(List<PortfolioItem> items, int bankCoins)
     {
+        if (!supabase.isProfileReady())
+        {
+            log.warn("[RuneVault] Bank sync skipped — profile not yet confirmed for this character.");
+            return;
+        }
         log.debug("[RuneVault] Syncing " + items.size() + " bank items");
         supabase.bulkUpsertItems(items);
 
