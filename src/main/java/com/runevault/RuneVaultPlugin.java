@@ -19,6 +19,7 @@ import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.ExecutorServiceExceptionLogger;
 import okhttp3.OkHttpClient;
 
+import javax.swing.SwingUtilities;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -95,6 +96,7 @@ public class RuneVaultPlugin extends Plugin
                     config.setConnectionStatus("Connected \u2713");
                     panel.setConnected(lastPlayerName);
                     supabase.setPluginActive(true);
+                    showSyncWarningIfNeeded();
                 }
                 else
                 {
@@ -148,6 +150,17 @@ public class RuneVaultPlugin extends Plugin
         // distinguish active (online) from crashed (stale) vs disconnected (explicit).
         linkCodePoller.scheduleWithFixedDelay(
             () -> supabase.sendHeartbeat(), 120, 120, TimeUnit.SECONDS);
+
+        // Poll every 10s for a remote disconnect request from the app.
+        linkCodePoller.scheduleWithFixedDelay(() -> {
+            if (supabase.checkRemoteDisconnect())
+            {
+                log.info("[RuneVault] Remote disconnect requested by app.");
+                SwingUtilities.invokeLater(() -> panel.setDisconnected());
+                showChatMessage("Disconnected from Rune Vault via the app.");
+                supabase.disconnect();
+            }
+        }, 10, 10, TimeUnit.SECONDS);
     }
 
     private void checkLinkCode()
@@ -207,6 +220,13 @@ public class RuneVaultPlugin extends Plugin
         );
     }
 
+    private void showSyncWarningIfNeeded()
+    {
+        if (config.syncWarningShown()) return;
+        config.setSyncWarningShown(true);
+        showChatMessage("Your GE trades, inventory pickups/drops, and bank contents will be synced to your Rune Vault account. You can disable any of these in the plugin panel.");
+    }
+
     private void handlePanelConnect()
     {
         if (!isConnecting.compareAndSet(false, true)) return;
@@ -237,6 +257,7 @@ public class RuneVaultPlugin extends Plugin
                 shownDisabledWarning = false;
                 panel.setConnected(lastPlayerName);
                 showChatMessage("Linked! Your portfolio will now sync automatically.");
+                showSyncWarningIfNeeded();
                 log.info("[RuneVault] Linked successfully via panel.");
                 // Stop the link-code checkbox poller — no longer needed after successful link
                 if (linkCodePollerFuture != null) linkCodePollerFuture.cancel(false);

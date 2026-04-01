@@ -264,4 +264,10 @@ public interface RuneVaultConfig extends Config
 
     @ConfigItem(keyName = "linkedUserId", name = "", description = "")
     void setLinkedUserId(String userId);
+
+    @ConfigItem(keyName = "syncWarningShown", name = "", description = "", hidden = true)
+    default boolean syncWarningShown() { return false; }
+
+    @ConfigItem(keyName = "syncWarningShown", name = "", description = "")
+    void setSyncWarningShown(boolean shown);
 }

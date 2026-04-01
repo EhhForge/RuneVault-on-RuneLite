@@ -217,7 +217,7 @@ public class SupabaseClient
             String[] parts = token.split("\\.");
             if (parts.length < 2) return true;
             String payload = new String(java.util.Base64.getUrlDecoder().decode(parts[1]));
-            JsonObject json = JsonParser.parseString(payload).getAsJsonObject();
+            JsonObject json = new JsonParser().parse(payload).getAsJsonObject();
             long exp = json.get("exp").getAsLong();
             return System.currentTimeMillis() / 1000L >= exp - 30; // 30s buffer
         }
@@ -297,6 +297,57 @@ public class SupabaseClient
             .build();
 
         executeAsync(request, "heartbeat");
+    }
+
+    /**
+     * Polls plugin_disconnect_requested on the profile row.
+     * Returns true if the app has requested a remote disconnect, false otherwise.
+     * If true, also clears the flag on the server so it doesn't re-trigger.
+     */
+    public boolean checkRemoteDisconnect()
+    {
+        if (cachedProfileId == null || !isAuthenticated()) return false;
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId
+                + "&select=plugin_disconnect_requested")
+            .get()
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Accept",        "application/json")
+            .build();
+
+        try (Response response = httpClient.newCall(request).execute())
+        {
+            if (!response.isSuccessful() || response.body() == null) return false;
+            String body = response.body().string();
+            com.google.gson.JsonArray arr = new JsonParser().parse(body).getAsJsonArray();
+            if (arr.size() == 0) return false;
+            JsonObject row = arr.get(0).getAsJsonObject();
+            if (!row.has("plugin_disconnect_requested")) return false;
+            boolean requested = row.get("plugin_disconnect_requested").getAsBoolean();
+            if (!requested) return false;
+
+            // Clear the flag immediately so it doesn't fire again on next poll
+            JsonObject clear = new JsonObject();
+            clear.addProperty("plugin_disconnect_requested", false);
+            Request clearReq = new Request.Builder()
+                .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId)
+                .patch(RequestBody.create(JSON, gson.toJson(clear)))
+                .addHeader("apikey",        ANON_KEY)
+                .addHeader("Authorization", "Bearer " + config.authToken())
+                .addHeader("Content-Type",  "application/json")
+                .addHeader("Prefer",        "return=minimal")
+                .build();
+            try (Response clearResp = httpClient.newCall(clearReq).execute()) { /* fire and forget */ }
+
+            return true;
+        }
+        catch (IOException e)
+        {
+            log("checkRemoteDisconnect error: " + e.getMessage());
+            return false;
+        }
     }
 
     // -------------------------------------------------------------------------
