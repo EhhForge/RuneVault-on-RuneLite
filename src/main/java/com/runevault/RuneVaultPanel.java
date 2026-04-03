@@ -24,6 +24,8 @@ public class RuneVaultPanel extends PluginPanel
     private final JLabel statusText = new JLabel("Not connected");
     private final JLabel profileLabel = new JLabel(" ");
 
+    private String currentPlayerName = null;
+
     // Connect form
     private final JTextField codeField    = new JTextField();
     private final JButton    connectBtn   = new JButton("Connect");
@@ -31,6 +33,15 @@ public class RuneVaultPanel extends PluginPanel
 
     // Disconnect
     private final JButton disconnectBtn = new JButton("Disconnect");
+
+    // Sync toggle checkboxes — stored so refreshToggles() can update them
+    private JCheckBox syncGETradesBox;
+    private JCheckBox trackPickupsBox;
+    private JCheckBox trackDropsBox;
+    private JCheckBox syncCashBox;
+    private JCheckBox bankScanBox;
+    private JCheckBox publicProfileBox;
+    private JComboBox<String> scanModeBox;
 
     private final RuneVaultConfig config;
 
@@ -89,7 +100,7 @@ public class RuneVaultPanel extends PluginPanel
         statusDot.setFont(new Font("Monospaced", Font.PLAIN, 13));
         statusDot.setForeground(COLOR_DISCONNECTED);
         statusText.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-        statusText.setFont(FontManager.getRunescapeSmallFont());
+        statusText.setFont(FontManager.getRunescapeSmallFont().deriveFont(Font.BOLD));
         statusRow.add(statusDot);
         statusRow.add(statusText);
         statusRow.setAlignmentX(LEFT_ALIGNMENT);
@@ -164,7 +175,12 @@ public class RuneVaultPanel extends PluginPanel
         openWebBtn.setBorderPainted(true);
         openWebBtn.setAlignmentX(LEFT_ALIGNMENT);
         openWebBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
-        openWebBtn.addActionListener(e -> LinkBrowser.browse("https://runevault.vaultek.co"));
+        openWebBtn.addActionListener(e -> {
+            String url = currentPlayerName != null
+                ? "https://runevault.vaultek.co/u/" + currentPlayerName.replace(" ", "%20")
+                : "https://runevault.vaultek.co";
+            LinkBrowser.browse(url);
+        });
         root.add(openWebBtn);
 
         // ── Hint ─────────────────────────────────────────────────────────────
@@ -191,15 +207,36 @@ public class RuneVaultPanel extends PluginPanel
         card.add(heading);
         card.add(Box.createVerticalStrut(6));
 
-        card.add(buildToggle("GE Trades",      config.syncGeTrades(),       v -> config.setSyncGeTrades(v)));
+        syncGETradesBox  = addToggle(card, "GE Trades",     config.syncGeTrades(),      v -> config.setSyncGeTrades(v));
         card.add(Box.createVerticalStrut(3));
-        card.add(buildToggle("Item Pickups",   config.trackPickups(),        v -> config.setTrackPickups(v)));
+        trackPickupsBox  = addToggle(card, "Item Pickups",  config.trackPickups(),       v -> config.setTrackPickups(v));
         card.add(Box.createVerticalStrut(3));
-        card.add(buildToggle("Drops & Sales",  config.trackDropsAndSales(),  v -> config.setTrackDropsAndSales(v)));
+        trackDropsBox    = addToggle(card, "Drops & Sales", config.trackDropsAndSales(), v -> config.setTrackDropsAndSales(v));
         card.add(Box.createVerticalStrut(3));
-        card.add(buildToggle("Cash Stack",     config.syncCash(),            v -> config.setSyncCash(v)));
+        syncCashBox      = addToggle(card, "Cash Stack",    config.syncCash(),           v -> config.setSyncCash(v));
         card.add(Box.createVerticalStrut(3));
-        card.add(buildToggle("Bank Scan",      config.bankScanEnabled(),     v -> config.setBankScanEnabled(v)));
+        bankScanBox      = addToggle(card, "Bank Scan",     config.bankScanEnabled(),    v -> config.setBankScanEnabled(v));
+        card.add(Box.createVerticalStrut(3));
+
+        // Scan Mode dropdown — only relevant when bank scan is on
+        JPanel scanModeRow = new JPanel(new BorderLayout(6, 0));
+        scanModeRow.setOpaque(false);
+        scanModeRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 20));
+        scanModeRow.setAlignmentX(LEFT_ALIGNMENT);
+        JLabel scanModeLabel = new JLabel("  Scan Mode");
+        scanModeLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+        scanModeLabel.setFont(FontManager.getRunescapeSmallFont());
+        scanModeBox = new JComboBox<>(new String[]{"Prompt", "Auto"});
+        scanModeBox.setSelectedItem(config.bankScanMode() == BankScanMode.AUTO ? "Auto" : "Prompt");
+        scanModeBox.setFont(FontManager.getRunescapeSmallFont());
+        scanModeBox.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        scanModeBox.setForeground(Color.WHITE);
+        scanModeBox.setMaximumSize(new Dimension(80, 20));
+        scanModeBox.addActionListener(e -> config.setBankScanMode(
+            "Auto".equals(scanModeBox.getSelectedItem()) ? BankScanMode.AUTO : BankScanMode.PROMPT));
+        scanModeRow.add(scanModeLabel, BorderLayout.CENTER);
+        scanModeRow.add(scanModeBox,   BorderLayout.EAST);
+        card.add(scanModeRow);
 
         // ── Privacy divider ───────────────────────────────────────────────────
         card.add(Box.createVerticalStrut(8));
@@ -217,15 +254,16 @@ public class RuneVaultPanel extends PluginPanel
         card.add(privacyHeading);
         card.add(Box.createVerticalStrut(4));
 
-        card.add(buildToggle("Public Portfolio", config.publicProfile(), v -> {
+        publicProfileBox = addToggle(card, "Public Portfolio", config.publicProfile(), v -> {
             config.setPublicProfile(v);
             if (onPublicToggle != null) onPublicToggle.accept(v);
-        }));
+        });
 
         return card;
     }
 
-    private JPanel buildToggle(String label, boolean initialValue, java.util.function.Consumer<Boolean> onToggle)
+    /** Builds a toggle row, adds it to the parent panel, and returns the checkbox for later updates. */
+    private JCheckBox addToggle(JPanel parent, String label, boolean initialValue, java.util.function.Consumer<Boolean> onToggle)
     {
         JPanel row = new JPanel(new BorderLayout(6, 0));
         row.setOpaque(false);
@@ -243,9 +281,28 @@ public class RuneVaultPanel extends PluginPanel
         box.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         box.addActionListener(e -> onToggle.accept(box.isSelected()));
 
-        row.add(lbl,  BorderLayout.CENTER);
-        row.add(box,  BorderLayout.EAST);
-        return row;
+        row.add(lbl, BorderLayout.CENTER);
+        row.add(box, BorderLayout.EAST);
+        parent.add(row);
+        return box;
+    }
+
+    /**
+     * Re-syncs all toggle checkboxes from the live config values.
+     * Call this whenever config may have changed externally (e.g. via the config panel).
+     */
+    public void refreshToggles(RuneVaultConfig config)
+    {
+        SwingUtilities.invokeLater(() ->
+        {
+            if (syncGETradesBox  != null) syncGETradesBox .setSelected(config.syncGeTrades());
+            if (trackPickupsBox  != null) trackPickupsBox .setSelected(config.trackPickups());
+            if (trackDropsBox    != null) trackDropsBox   .setSelected(config.trackDropsAndSales());
+            if (syncCashBox      != null) syncCashBox     .setSelected(config.syncCash());
+            if (bankScanBox      != null) bankScanBox     .setSelected(config.bankScanEnabled());
+            if (publicProfileBox != null) publicProfileBox.setSelected(config.publicProfile());
+            if (scanModeBox      != null) scanModeBox     .setSelectedItem(config.bankScanMode() == BankScanMode.AUTO ? "Auto" : "Prompt");
+        });
     }
 
     private JPanel buildCard()
@@ -286,6 +343,8 @@ public class RuneVaultPanel extends PluginPanel
     {
         SwingUtilities.invokeLater(() ->
         {
+            statusDot.setForeground(COLOR_WARNING);
+            statusText.setText("Connecting\u2026");
             connectBtn.setEnabled(false);
             connectBtn.setText("Connecting\u2026");
             feedbackLabel.setText(" ");
@@ -295,12 +354,13 @@ public class RuneVaultPanel extends PluginPanel
 
     public void setConnected(String playerName)
     {
+        currentPlayerName = (playerName != null && !playerName.isEmpty()) ? playerName : null;
         SwingUtilities.invokeLater(() ->
         {
             statusDot.setForeground(COLOR_CONNECTED);
             statusText.setText("Connected");
-            profileLabel.setText(playerName != null && !playerName.isEmpty()
-                ? "Playing as: " + playerName : " ");
+            profileLabel.setText(currentPlayerName != null
+                ? "Playing as: " + currentPlayerName : " ");
             codeField.setText("");
             connectBtn.setEnabled(true);
             connectBtn.setText("Re-link");
@@ -311,6 +371,7 @@ public class RuneVaultPanel extends PluginPanel
 
     public void setDisconnected()
     {
+        currentPlayerName = null;
         SwingUtilities.invokeLater(() ->
         {
             statusDot.setForeground(COLOR_DISCONNECTED);
@@ -327,6 +388,11 @@ public class RuneVaultPanel extends PluginPanel
     {
         SwingUtilities.invokeLater(() ->
         {
+            if (isError)
+            {
+                statusDot.setForeground(COLOR_DISCONNECTED);
+                statusText.setText("Not connected");
+            }
             feedbackLabel.setForeground(isError ? COLOR_DISCONNECTED : COLOR_CONNECTED);
             feedbackLabel.setText(message);
             connectBtn.setEnabled(true);
@@ -336,9 +402,10 @@ public class RuneVaultPanel extends PluginPanel
 
     public void updatePlayerName(String playerName)
     {
+        currentPlayerName = (playerName != null && !playerName.isEmpty()) ? playerName : currentPlayerName;
         SwingUtilities.invokeLater(() ->
-            profileLabel.setText(playerName != null && !playerName.isEmpty()
-                ? "Playing as: " + playerName : " ")
+            profileLabel.setText(currentPlayerName != null
+                ? "Playing as: " + currentPlayerName : " ")
         );
     }
 
@@ -349,9 +416,13 @@ public class RuneVaultPanel extends PluginPanel
     public static java.awt.image.BufferedImage buildNavIcon()
     {
         java.awt.image.BufferedImage img =
-            new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+            new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_RGB);
         Graphics2D g = img.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        // Fill background with toolbar colour so there are no alpha-composite smudges
+        g.setColor(new Color(0x3b, 0x3b, 0x3b));
+        g.fillRect(0, 0, 16, 16);
         g.setColor(new Color(0xe8, 0xa0, 0x60));
         g.fillRoundRect(0, 0, 16, 16, 5, 5);
         g.setColor(new Color(0x1a, 0x0a, 0x00));

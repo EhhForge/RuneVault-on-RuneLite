@@ -68,7 +68,7 @@ public class GETracker
         if (state == GrandExchangeOfferState.BOUGHT)
         {
             log.debug("[RuneVault] GE BUY: " + quantity + "x " + itemName + " @ " + price + "gp (actual, bid was " + offer.getPrice() + "gp)");
-            supabase.upsertItem(new PortfolioItem(itemId, itemName, quantity, price, imageUrl));
+            supabase.upsertItem(new PortfolioItem(itemId, itemName, quantity, price, imageUrl, 0));
         }
         else
         {

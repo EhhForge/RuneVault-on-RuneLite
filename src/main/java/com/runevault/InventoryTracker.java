@@ -139,7 +139,9 @@ public class InventoryTracker
 
         // Only count genuine ground pickups (preceded by a "Take" click).
         // This prevents GE collections, bank withdrawals, etc. from being double-counted.
-        if (!pendingPickup || pendingPickupItemId != itemId) return;
+        // pendingPickupItemId is -1 for ground items (loot piles) — skip ID check in that case.
+        if (!pendingPickup) return;
+        if (pendingPickupItemId != -1 && pendingPickupItemId != itemId) return;
 
         int canonicalId = itemManager.canonicalize(itemId);
         if (canonicalId <= 0) return;
@@ -148,7 +150,7 @@ public class InventoryTracker
         log.debug("[RuneVault] Picked up: " + quantity + "x " + itemName);
 
         // Buy price unknown for pickups — set to 0
-        PortfolioItem item = new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl);
+        PortfolioItem item = new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl, 0);
         supabase.upsertItem(item);
     }
 

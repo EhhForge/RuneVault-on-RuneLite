@@ -170,6 +170,9 @@ public interface RuneVaultConfig extends Config
         return BankScanMode.PROMPT;
     }
 
+    @ConfigItem(keyName = "bankScanMode", name = "", description = "")
+    void setBankScanMode(BankScanMode mode);
+
     @ConfigItem(
         keyName = "bankOverwriteDuplicates",
         name = "Overwrite Duplicates",
@@ -182,6 +185,9 @@ public interface RuneVaultConfig extends Config
         return true;
     }
 
+    @ConfigItem(keyName = "bankOverwriteDuplicates", name = "", description = "")
+    void setBankOverwriteDuplicates(boolean value);
+
     @ConfigItem(
         keyName = "bankRemoveMissing",
         name = "Remove Missing Items",
@@ -193,6 +199,9 @@ public interface RuneVaultConfig extends Config
     {
         return false;
     }
+
+    @ConfigItem(keyName = "bankRemoveMissing", name = "", description = "")
+    void setBankRemoveMissing(boolean value);
 
     // -------------------------------------------------------------------------
     // Privacy

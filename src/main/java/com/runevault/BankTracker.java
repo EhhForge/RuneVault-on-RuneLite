@@ -6,12 +6,14 @@ import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.WidgetLoaded;
-import net.runelite.api.widgets.ComponentID;
 import net.runelite.client.game.ItemManager;
 
 import javax.swing.*;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
 
 @Slf4j
 public class BankTracker
@@ -23,6 +25,7 @@ public class BankTracker
     private final SupabaseClient supabase;
     private final RuneVaultConfig config;
     private final ItemManager itemManager;
+    private final Consumer<String> chatMessage;
 
     // Becomes true once the bank container fires after the bank widget loads
     private boolean bankOpenPending = false;
@@ -30,11 +33,12 @@ public class BankTracker
     // Most recent inventory coin balance — kept in sync so we can add it to bank coins on scan
     private int cachedInventoryCoins = 0;
 
-    public BankTracker(SupabaseClient supabase, RuneVaultConfig config, ItemManager itemManager)
+    public BankTracker(SupabaseClient supabase, RuneVaultConfig config, ItemManager itemManager, Consumer<String> chatMessage)
     {
         this.supabase = supabase;
         this.config = config;
         this.itemManager = itemManager;
+        this.chatMessage = chatMessage;
     }
 
     /**
@@ -42,9 +46,11 @@ public class BankTracker
      */
     public void onWidgetLoaded(WidgetLoaded event)
     {
+        log.debug("[RuneVault] onWidgetLoaded groupId={} bankScanEnabled={}", event.getGroupId(), config.bankScanEnabled());
         if (!config.bankScanEnabled()) return;
         if (event.getGroupId() == BANK_WIDGET_GROUP_ID)
         {
+            log.debug("[RuneVault] Bank widget detected — setting bankOpenPending=true");
             bankOpenPending = true;
         }
     }
@@ -63,6 +69,8 @@ public class BankTracker
         }
 
         if (!config.bankScanEnabled()) return;
+        log.debug("[RuneVault] onItemContainerChanged containerId={} bankOpenPending={} bankId={}",
+            event.getContainerId(), bankOpenPending, InventoryID.BANK.getId());
         if (!bankOpenPending) return;
         if (event.getContainerId() != InventoryID.BANK.getId()) return;
 
@@ -71,53 +79,84 @@ public class BankTracker
         ItemContainer container = event.getItemContainer();
         if (container == null) return;
 
-        List<PortfolioItem> items = buildItemList(container);
+        ScanResult result = buildItemList(container);
         int bankCoins = getCoins(container);
-        if (items.isEmpty() && bankCoins == 0) return;
+        log.debug("[RuneVault] Bank scan: {} items, {} placeholders skipped, {} coins",
+            result.items.size(), result.placeholderCount, bankCoins);
+        if (result.items.isEmpty() && bankCoins == 0) return;
 
         if (config.bankScanMode() == BankScanMode.AUTO)
         {
-            syncItems(items, bankCoins);
+            syncItems(result, bankCoins);
         }
         else
         {
-            promptUser(items, bankCoins);
+            promptUser(result, bankCoins);
         }
     }
 
-    private void promptUser(List<PortfolioItem> items, int bankCoins)
+    private void promptUser(ScanResult result, int bankCoins)
     {
         SwingUtilities.invokeLater(() ->
         {
-            int result = JOptionPane.showConfirmDialog(
+            int totalSlots = result.items.size() + (bankCoins > 0 ? 1 : 0);
+            String placeholderNote = result.placeholderCount > 0
+                ? "\n(" + result.placeholderCount + " placeholder slot(s) skipped)"
+                : "";
+
+            JPanel panel = new JPanel();
+            panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+
+            String placeholderLine = result.placeholderCount > 0
+                ? "<br>(" + result.placeholderCount + " placeholder slot(s) skipped)"
+                : "";
+            JLabel messageLabel = new JLabel("<html><body style='width:360px;font-size:13pt;font-weight:bold'>"
+                + "Sync " + totalSlots + " bank slot(s) to Rune Vault?"
+                + placeholderLine
+                + "</body></html>");
+            panel.add(messageLabel);
+            panel.add(Box.createVerticalStrut(12));
+
+            JCheckBox autoCheckbox = new JCheckBox("<html><body style='width:340px;font-size:11pt'>"
+                + "Switch to Auto mode <span style='color:gray'>(recommended — syncs automatically on every bank open)</span>"
+                + "</body></html>");
+            panel.add(autoCheckbox);
+
+            int confirm = JOptionPane.showConfirmDialog(
                 null,
-                "Sync " + items.size() + " bank item(s) to Rune Vault?",
+                panel,
                 "Rune Vault — Bank Scan",
                 JOptionPane.YES_NO_OPTION,
                 JOptionPane.QUESTION_MESSAGE
             );
 
-            if (result == JOptionPane.YES_OPTION)
+            if (confirm == JOptionPane.YES_OPTION)
             {
-                syncItems(items, bankCoins);
+                if (autoCheckbox.isSelected())
+                {
+                    config.setBankScanMode(BankScanMode.AUTO);
+                }
+                syncItems(result, bankCoins);
             }
         });
     }
 
-    private void syncItems(List<PortfolioItem> items, int bankCoins)
+    private void syncItems(ScanResult result, int bankCoins)
     {
         if (!supabase.isProfileReady())
         {
             log.warn("[RuneVault] Bank sync skipped — profile not yet confirmed for this character.");
+            chatMessage.accept("<col=ff6060>Bank sync skipped</col> \u2014 not yet connected. Link via the Rune Vault panel.");
             return;
         }
-        log.debug("[RuneVault] Syncing " + items.size() + " bank items");
-        supabase.bulkUpsertItems(items);
+        log.debug("[RuneVault] Syncing {} bank items ({} placeholders skipped)",
+            result.items.size(), result.placeholderCount);
+        supabase.bulkUpsertItems(result.items);
 
         if (config.bankRemoveMissing())
         {
             java.util.Set<Integer> bankItemIds = new java.util.HashSet<>();
-            for (PortfolioItem item : items) bankItemIds.add(item.getItemId());
+            for (PortfolioItem item : result.items) bankItemIds.add(item.getItemId());
             supabase.removeItemsMissingFromBank(bankItemIds);
         }
 
@@ -126,24 +165,67 @@ public class BankTracker
             long totalCoins = (long) bankCoins + cachedInventoryCoins;
             if (totalCoins > 0) supabase.updateCash(totalCoins);
         }
+
+        int synced = result.items.size() + (bankCoins > 0 ? 1 : 0);
+        String skipped = result.placeholderCount > 0 ? " (" + result.placeholderCount + " placeholders skipped)" : "";
+        chatMessage.accept("<col=00c060>Bank synced:</col> " + synced + " slot(s)." + skipped);
     }
 
-    private List<PortfolioItem> buildItemList(ItemContainer container)
+    /**
+     * Builds the list of real items from the bank container.
+     * - Skips coins, empty slots, and placeholder slots.
+     * - Aggregates quantities across multiple slots of the same item
+     *   (e.g. two Fire cape slots → quantity 2, split bolt stacks → summed).
+     */
+    private ScanResult buildItemList(ItemContainer container)
     {
-        List<PortfolioItem> items = new ArrayList<>();
+        // LinkedHashMap preserves insertion order and accumulates quantity per canonical ID
+        Map<Integer, PortfolioItem> byId = new LinkedHashMap<>();
+        int placeholderCount = 0;
+
         for (Item item : container.getItems())
         {
             if (item.getId() <= 0 || item.getId() == COINS_ID) continue;
-            if (item.getQuantity() <= 0) continue; // skip placeholders
+            if (item.getQuantity() <= 0) continue; // empty slots
+
+            // Placeholders report quantity=1 but the item is not actually owned.
+            // getPlaceholderTemplateId() returns 0 for real items, >0 for placeholders.
+            if (itemManager.getItemComposition(item.getId()).getPlaceholderTemplateId() > 0)
+            {
+                placeholderCount++;
+                continue;
+            }
+
             int canonicalId = itemManager.canonicalize(item.getId());
             if (canonicalId <= 0) continue;
-            String rawName = itemManager.getItemComposition(canonicalId).getName();
-            String nameLower = rawName.toLowerCase();
-            String name = nameLower.endsWith(" (members)") ? rawName.substring(0, rawName.length() - 10) : rawName;
-            String imageUrl = "https://static.runelite.net/cache/item/icon/" + canonicalId + ".png";
-            items.add(new PortfolioItem(canonicalId, name, item.getQuantity(), 0, imageUrl));
+
+            PortfolioItem existing = byId.get(canonicalId);
+            if (existing != null)
+            {
+                // Same item in multiple bank slots (e.g. noted + unnoted, or duplicate
+                // untradeable like Fire cape) — sum the quantities.
+                byId.put(canonicalId, new PortfolioItem(
+                    canonicalId,
+                    existing.getItemName(),
+                    existing.getQuantity() + item.getQuantity(),
+                    0,
+                    existing.getImageUrl(),
+                    existing.getHaPrice()
+                ));
+            }
+            else
+            {
+                net.runelite.api.ItemComposition comp = itemManager.getItemComposition(canonicalId);
+                String rawName  = comp.getName();
+                String nameLower = rawName.toLowerCase();
+                String name     = nameLower.endsWith(" (members)") ? rawName.substring(0, rawName.length() - 10) : rawName;
+                String imageUrl = "https://static.runelite.net/cache/item/icon/" + canonicalId + ".png";
+                int haPrice     = (int) Math.floor(comp.getPrice() * 0.6);
+                byId.put(canonicalId, new PortfolioItem(canonicalId, name, item.getQuantity(), 0, imageUrl, haPrice));
+            }
         }
-        return items;
+
+        return new ScanResult(new ArrayList<>(byId.values()), placeholderCount);
     }
 
     private int getCoins(ItemContainer container)
@@ -153,5 +235,18 @@ public class BankTracker
             if (item.getId() == COINS_ID) return item.getQuantity();
         }
         return 0;
+    }
+
+    /** Holds the result of a bank scan: real items + how many placeholders were skipped. */
+    private static class ScanResult
+    {
+        final List<PortfolioItem> items;
+        final int placeholderCount;
+
+        ScanResult(List<PortfolioItem> items, int placeholderCount)
+        {
+            this.items = items;
+            this.placeholderCount = placeholderCount;
+        }
     }
 }

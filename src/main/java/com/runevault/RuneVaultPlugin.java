@@ -8,6 +8,7 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.events.*;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -69,7 +70,7 @@ public class RuneVaultPlugin extends Plugin
         supabase = new SupabaseClient(okHttpClient, gson, config);
         geTracker = new GETracker(supabase, config, itemManager);
         inventoryTracker = new InventoryTracker(supabase, config, itemManager);
-        bankTracker = new BankTracker(supabase, config, itemManager);
+        bankTracker = new BankTracker(supabase, config, itemManager, this::showChatMessage);
 
         // Build the side panel
         panel = new RuneVaultPanel(e -> handlePanelConnect(), e -> handlePanelDisconnect(), config,
@@ -329,6 +330,7 @@ public class RuneVaultPlugin extends Plugin
         {
             geTracker.reset();
             playerNamePending = false;
+            lastPlayerName = null; // reset so the connected message shows on next genuine login
         }
     }
 
@@ -340,12 +342,18 @@ public class RuneVaultPlugin extends Plugin
         if (playerName == null) return; // still loading — try again next tick
 
         playerNamePending = false;
+        boolean isNewLogin = !playerName.equals(lastPlayerName);
         lastPlayerName = playerName;
         panel.updatePlayerName(playerName);
 
         if (supabase.isAuthenticated())
         {
             final String name = playerName;
+            // Only show the connected message on a genuine login, not on instance/area changes
+            if (isNewLogin)
+            {
+                showChatMessage("<col=00c060>Connected</col> as <col=e8a060>" + name + "</col> \u2014 syncing to Rune Vault.");
+            }
             linkCodePoller.execute(() -> supabase.switchProfileForUsername(name));
         }
     }
@@ -382,6 +390,14 @@ public class RuneVaultPlugin extends Plugin
     {
         if (!supabase.isAuthenticated()) return;
         inventoryTracker.onMenuOptionClicked(event);
+    }
+
+    @Subscribe
+    public void onConfigChanged(ConfigChanged event)
+    {
+        if (!"runevault".equals(event.getGroup())) return;
+        // Keep the side panel toggles in sync when a setting is changed via the config panel
+        panel.refreshToggles(config);
     }
 
     @Subscribe

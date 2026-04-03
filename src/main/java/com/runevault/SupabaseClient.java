@@ -132,6 +132,19 @@ public class SupabaseClient
         String token = config.authToken();
         if (token.isEmpty()) return;
 
+        // If stored token is expired, try to get a new one before proceeding
+        if (isTokenExpired(token))
+        {
+            log("Stored token expired — attempting silent refresh on startup...");
+            if (!refreshAccessToken())
+            {
+                clearStoredCredentials();
+                log("Session expired and refresh failed. Enter a new Link Code to re-link.");
+                return;
+            }
+            token = config.authToken();
+        }
+
         // Prefer persisted userId (avoids JWT decode)
         String userId = config.linkedUserId();
         if (userId.isEmpty())
@@ -216,6 +229,23 @@ public class SupabaseClient
         return !token.isEmpty() && !isTokenExpired(token);
     }
 
+    /**
+     * Returns true if we have a valid access token, silently refreshing it if expired.
+     * Synchronized so concurrent sync calls don't all fire a refresh at once.
+     */
+    private synchronized boolean ensureAuthenticated()
+    {
+        if (isAuthenticated()) return true;
+        log("Access token expired — attempting silent refresh...");
+        boolean ok = refreshAccessToken();
+        if (!ok)
+        {
+            log("Token refresh failed — please re-link via the Rune Vault panel.");
+            clearStoredCredentials();
+        }
+        return ok;
+    }
+
     private boolean isTokenExpired(String token)
     {
         try
@@ -244,6 +274,9 @@ public class SupabaseClient
         profileReady = false;
         setPluginActive(false); // tell the app before wiping the token
         clearStoredCredentials();
+        cachedUserId    = null;
+        cachedProfileId = null;
+        cachedCashTotal = -1;
         config.setLinkCode("");
         config.setConnectionStatus("Not connected");
         log("Disconnected from Rune Vault.");
@@ -288,7 +321,7 @@ public class SupabaseClient
      */
     public void sendHeartbeat()
     {
-        if (cachedProfileId == null || !isAuthenticated()) return;
+        if (cachedProfileId == null || !ensureAuthenticated()) return;
 
         JsonObject body = new JsonObject();
         body.addProperty("plugin_active",    true);
@@ -313,7 +346,7 @@ public class SupabaseClient
      */
     public boolean checkRemoteDisconnect()
     {
-        if (cachedProfileId == null || !isAuthenticated()) return false;
+        if (cachedProfileId == null || !ensureAuthenticated()) return false;
 
         Request request = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId
@@ -366,7 +399,7 @@ public class SupabaseClient
      */
     public void upsertItem(PortfolioItem item)
     {
-        if (!isAuthenticated()) return;
+        if (!ensureAuthenticated()) return;
         if (!hasProfile()) { log("upsertItem skipped — no profile loaded yet"); return; }
 
         Request fetchRequest = new Request.Builder()
@@ -457,7 +490,7 @@ public class SupabaseClient
      */
     public void decrementItem(int itemId, int quantityToRemove)
     {
-        if (!isAuthenticated()) return;
+        if (!ensureAuthenticated()) return;
 
         Request fetchRequest = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/portfolio_items"
@@ -533,7 +566,7 @@ public class SupabaseClient
     public void updateCash(long amount)
     {
         cachedCashTotal = amount;
-        PortfolioItem coins = new PortfolioItem(995, "Coins", (int) amount, 1, null);
+        PortfolioItem coins = new PortfolioItem(995, "Coins", (int) amount, 1, null, 0);
         doUpsertItem(coins, (int) amount, 1);
     }
 
@@ -555,29 +588,29 @@ public class SupabaseClient
 
     public void bulkUpsertItems(java.util.List<PortfolioItem> items)
     {
-        if (!isAuthenticated() || items.isEmpty()) return;
+        if (!ensureAuthenticated() || items.isEmpty()) return;
         if (!hasProfile()) { log("bulkUpsert skipped — profile not loaded yet"); return; }
 
         String userId = getUserId();
-        String nowIso = java.time.Instant.now().toString();
-        long nowMs    = System.currentTimeMillis();
 
         JsonArray body = new JsonArray();
         for (PortfolioItem item : items)
         {
             JsonObject obj = new JsonObject();
-            obj.addProperty("id",            java.util.UUID.randomUUID().toString());
-            obj.addProperty("user_id",        userId);
-            obj.addProperty("profile_id",     cachedProfileId);
-            obj.addProperty("item_id",        item.getItemId());
-            obj.addProperty("item_name",      item.getItemName());
-            obj.addProperty("game",           "osrs");
-            obj.addProperty("quantity",       item.getQuantity());
-            obj.addProperty("buy_price",      item.getBuyPrice());
-            obj.addProperty("buy_date",       nowIso);
-            obj.addProperty("last_added_at",  nowMs);
-            obj.addProperty("watchlisted",    false);
-            obj.addProperty("source",         "runelite");
+            obj.addProperty("id",         java.util.UUID.randomUUID().toString());
+            obj.addProperty("user_id",    userId);
+            obj.addProperty("profile_id", cachedProfileId);
+            obj.addProperty("item_id",    item.getItemId());
+            obj.addProperty("item_name",  item.getItemName());
+            obj.addProperty("game",       "osrs");
+            obj.addProperty("quantity",   item.getQuantity());
+            obj.addProperty("buy_price",  item.getBuyPrice());
+            obj.addProperty("ha_price",   item.getHaPrice());
+            obj.addProperty("watchlisted", false);
+            obj.addProperty("source",     "runelite");
+            // Intentionally omitting last_added_at and buy_date — bank scans should not
+            // update these fields on existing rows, keeping GE/pickup timestamps intact.
+            // New rows (first bank scan) will have null, so they won't appear in Latest Added.
             if (item.getImageUrl() != null) obj.addProperty("image_url", item.getImageUrl());
             body.add(obj);
         }
@@ -600,7 +633,7 @@ public class SupabaseClient
 
     public void removeItemsMissingFromBank(java.util.Set<Integer> bankItemIds)
     {
-        if (!isAuthenticated() || !hasProfile()) return;
+        if (!ensureAuthenticated() || !hasProfile()) return;
 
         Request fetchRequest = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/portfolio_items"
@@ -679,7 +712,7 @@ public class SupabaseClient
 
         Request request = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/profiles?user_id=eq." + cachedUserId
-                + "&name=eq." + encoded
+                + "&name=ilike." + encoded
                 + "&select=id,name&limit=1")
             .get()
             .addHeader("apikey",        ANON_KEY)
@@ -711,7 +744,7 @@ public class SupabaseClient
                 log("No profile found for " + rsUsername + " — creating one.");
                 createProfileForUsername(rsUsername);
             }
-            profileReady = true;
+            if (cachedProfileId != null) profileReady = true;
         }
         catch (IOException e)
         {
@@ -725,6 +758,8 @@ public class SupabaseClient
         body.addProperty("id",      java.util.UUID.randomUUID().toString());
         body.addProperty("user_id", cachedUserId);
         body.addProperty("name",    rsUsername);
+        body.addProperty("game",    "osrs");
+        body.addProperty("color",   "#f0c040");
 
         Request request = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/profiles")
