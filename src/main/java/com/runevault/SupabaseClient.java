@@ -22,9 +22,9 @@ public class SupabaseClient
     private final Gson gson;
     private final RuneVaultConfig config;
 
-    private String cachedUserId    = null;
-    private String cachedProfileId = null;
-    private long   cachedCashTotal = -1; // -1 = not yet known (bank not opened)
+    private volatile String cachedUserId    = null;
+    private volatile String cachedProfileId = null;
+    private volatile long   cachedCashTotal = -1; // -1 = not yet known (bank not opened)
 
     // Set to true only after switchProfileForUsername() completes for the current session.
     // Prevents bank/inventory syncs from firing against the wrong profile during startup.
@@ -440,10 +440,10 @@ public class SupabaseClient
                     else
                     {
                         JsonObject row      = rows.get(0).getAsJsonObject();
-                        int existingQty     = row.get("quantity").getAsInt();
+                        long existingQty    = row.get("quantity").getAsLong();
                         long existingPrice  = row.get("buy_price").getAsLong();
-                        int newQty          = existingQty + item.getQuantity();
-                        long avgPrice       = (existingQty * existingPrice + (long) item.getQuantity() * item.getBuyPrice()) / newQty;
+                        long newQty         = existingQty + item.getQuantity();
+                        long avgPrice       = ((long) existingQty * existingPrice + (long) item.getQuantity() * item.getBuyPrice()) / newQty;
                         doUpsertItem(item, newQty, avgPrice);
                     }
                 } finally {
@@ -453,7 +453,7 @@ public class SupabaseClient
         });
     }
 
-    private void doUpsertItem(PortfolioItem item, int quantity, long buyPrice)
+    private void doUpsertItem(PortfolioItem item, long quantity, long buyPrice)
     {
         String nowIso = java.time.Instant.now().toString();
         long nowMs    = System.currentTimeMillis();
@@ -490,6 +490,11 @@ public class SupabaseClient
      */
     public void decrementItem(int itemId, int quantityToRemove)
     {
+        decrementItem(itemId, quantityToRemove, 2);
+    }
+
+    private void decrementItem(int itemId, int quantityToRemove, int retriesLeft)
+    {
         if (!ensureAuthenticated()) return;
 
         Request fetchRequest = new Request.Builder()
@@ -508,7 +513,17 @@ public class SupabaseClient
             @Override
             public void onFailure(Call call, IOException e)
             {
-                log("decrementItem fetch error: " + e.getMessage());
+                if (retriesLeft > 0)
+                {
+                    int attempt = 3 - retriesLeft;
+                    log("decrementItem fetch error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
+                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                    decrementItem(itemId, quantityToRemove, retriesLeft - 1);
+                }
+                else
+                {
+                    log("decrementItem fetch failed after all retries: " + e.getMessage());
+                }
             }
 
             @Override
@@ -633,6 +648,11 @@ public class SupabaseClient
 
     public void removeItemsMissingFromBank(java.util.Set<Integer> bankItemIds)
     {
+        removeItemsMissingFromBank(bankItemIds, 2);
+    }
+
+    private void removeItemsMissingFromBank(java.util.Set<Integer> bankItemIds, int retriesLeft)
+    {
         if (!ensureAuthenticated() || !hasProfile()) return;
 
         Request fetchRequest = new Request.Builder()
@@ -651,7 +671,17 @@ public class SupabaseClient
             @Override
             public void onFailure(Call call, IOException e)
             {
-                log("removeItemsMissingFromBank error: " + e.getMessage());
+                if (retriesLeft > 0)
+                {
+                    int attempt = 3 - retriesLeft;
+                    log("removeItemsMissingFromBank error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
+                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                    removeItemsMissingFromBank(bankItemIds, retriesLeft - 1);
+                }
+                else
+                {
+                    log("removeItemsMissingFromBank failed after all retries: " + e.getMessage());
+                }
             }
 
             @Override
@@ -964,12 +994,27 @@ public class SupabaseClient
 
     private void executeAsync(Request request, String label)
     {
+        executeAsync(request, label, 2);
+    }
+
+    private void executeAsync(Request request, String label, int retriesLeft)
+    {
         httpClient.newCall(request).enqueue(new Callback()
         {
             @Override
             public void onFailure(Call call, IOException e)
             {
-                log(label + " failed: " + e.getMessage());
+                if (retriesLeft > 0)
+                {
+                    int attempt = 3 - retriesLeft;
+                    log(label + " failed (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
+                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                    executeAsync(request, label, retriesLeft - 1);
+                }
+                else
+                {
+                    log(label + " failed after all retries: " + e.getMessage());
+                }
             }
 
             @Override

@@ -9,6 +9,7 @@ import net.runelite.api.events.WidgetLoaded;
 import net.runelite.client.game.ItemManager;
 
 import javax.swing.*;
+import java.awt.Frame;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -100,44 +101,50 @@ public class BankTracker
         SwingUtilities.invokeLater(() ->
         {
             int totalSlots = result.items.size() + (bankCoins > 0 ? 1 : 0);
-            String placeholderNote = result.placeholderCount > 0
-                ? "\n(" + result.placeholderCount + " placeholder slot(s) skipped)"
-                : "";
-
-            JPanel panel = new JPanel();
-            panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-
             String placeholderLine = result.placeholderCount > 0
                 ? "<br>(" + result.placeholderCount + " placeholder slot(s) skipped)"
                 : "";
+
             JLabel messageLabel = new JLabel("<html><body style='width:360px;font-size:13pt;font-weight:bold'>"
                 + "Sync " + totalSlots + " bank slot(s) to Rune Vault?"
                 + placeholderLine
                 + "</body></html>");
-            panel.add(messageLabel);
-            panel.add(Box.createVerticalStrut(12));
 
             JCheckBox autoCheckbox = new JCheckBox("<html><body style='width:340px;font-size:11pt'>"
                 + "Switch to Auto mode <span style='color:gray'>(recommended — syncs automatically on every bank open)</span>"
                 + "</body></html>");
-            panel.add(autoCheckbox);
 
-            int confirm = JOptionPane.showConfirmDialog(
-                null,
-                panel,
-                "Rune Vault — Bank Scan",
-                JOptionPane.YES_NO_OPTION,
-                JOptionPane.QUESTION_MESSAGE
-            );
+            JButton yesButton = new JButton("Yes");
+            JButton noButton  = new JButton("No");
 
-            if (confirm == JOptionPane.YES_OPTION)
-            {
-                if (autoCheckbox.isSelected())
-                {
-                    config.setBankScanMode(BankScanMode.AUTO);
-                }
+            JPanel buttonPanel = new JPanel();
+            buttonPanel.add(yesButton);
+            buttonPanel.add(noButton);
+
+            JPanel content = new JPanel();
+            content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
+            content.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
+            content.add(messageLabel);
+            content.add(Box.createVerticalStrut(12));
+            content.add(autoCheckbox);
+            content.add(Box.createVerticalStrut(8));
+            content.add(buttonPanel);
+
+            JDialog dialog = new JDialog((Frame) null, "Rune Vault — Bank Scan", false);
+            dialog.setContentPane(content);
+            dialog.pack();
+            dialog.setLocationRelativeTo(null);
+            dialog.setAlwaysOnTop(true);
+            dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+
+            yesButton.addActionListener(e -> {
+                dialog.dispose();
+                if (autoCheckbox.isSelected()) config.setBankScanMode(BankScanMode.AUTO);
                 syncItems(result, bankCoins);
-            }
+            });
+            noButton.addActionListener(e -> dialog.dispose());
+
+            dialog.setVisible(true);
         });
     }
 
