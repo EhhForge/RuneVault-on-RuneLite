@@ -81,7 +81,10 @@ public class RealtimeClient
      */
     public synchronized void connect(String userId, String accessToken)
     {
-        if (closed) return;
+        // Reset closed so re-linking after a user disconnect reopens the socket.
+        // closed=true is only permanent during plugin shutdown (shutDown() path);
+        // a user disconnect + re-link must be able to reconnect.
+        closed        = false;
         currentUserId = userId;
         currentToken  = accessToken;
         openSocket();
