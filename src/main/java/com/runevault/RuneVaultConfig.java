@@ -204,28 +204,16 @@ public interface RuneVaultConfig extends Config
     void setBankRemoveMissing(boolean value);
 
     // -------------------------------------------------------------------------
-    // Privacy
+    // Privacy — publicProfile is managed exclusively through the side panel toggle,
+    // not the RuneLite config panel, to avoid a misleading checkbox that doesn't sync to the DB.
 
-    @ConfigSection(
-        name = "Privacy",
-        description = "Control who can see your portfolio",
-        position = 3
-    )
-    String privacySection = "privacy";
-
-    @ConfigItem(
-        keyName = "publicProfile",
-        name = "Public Portfolio",
-        description = "Allow anyone to view your portfolio at runevault.vaultek.co/u/[username]",
-        section = privacySection,
-        position = 0
-    )
+    @ConfigItem(keyName = "publicProfile", name = "", description = "", hidden = true)
     default boolean publicProfile()
     {
         return true;
     }
 
-    @ConfigItem(keyName = "publicProfile", name = "", description = "")
+    @ConfigItem(keyName = "publicProfile", name = "", description = "", hidden = true)
     void setPublicProfile(boolean value);
 
     // -------------------------------------------------------------------------
@@ -279,4 +267,10 @@ public interface RuneVaultConfig extends Config
 
     @ConfigItem(keyName = "syncWarningShown", name = "", description = "")
     void setSyncWarningShown(boolean shown);
+
+    @ConfigItem(keyName = "lastProfileId", name = "", description = "", hidden = true)
+    default String lastProfileId() { return ""; }
+
+    @ConfigItem(keyName = "lastProfileId", name = "", description = "")
+    void setLastProfileId(String profileId);
 }

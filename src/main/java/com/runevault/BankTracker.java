@@ -1,6 +1,7 @@
 package com.runevault;
 
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Client;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
@@ -20,37 +21,90 @@ import java.util.function.Consumer;
 public class BankTracker
 {
     // RuneLite widget group ID for the bank interface
-    private static final int BANK_WIDGET_GROUP_ID = 12;
+    public static final int BANK_WIDGET_GROUP_ID = 12;
     private static final int COINS_ID = 995;
 
     private final SupabaseClient supabase;
     private final RuneVaultConfig config;
     private final ItemManager itemManager;
     private final Consumer<String> chatMessage;
+    private final Client client;
 
     // Becomes true once the bank container fires after the bank widget loads
     private boolean bankOpenPending = false;
 
+    // True after the first scan this bank-open session.
+    // Prevents bank tab switches (which re-fire WidgetLoaded for group 12) from triggering
+    // a second scan with only the filtered tab's items visible.
+    // Reset by checkBankClosed() when the bank widget disappears.
+    private boolean bankScannedThisOpen = false;
+
+    // Number of consecutive game ticks that the bank widget has been absent.
+    // Requires 2+ consecutive null ticks before treating it as a real close — tab
+    // transitions briefly destroy the widget for 1 tick, which would otherwise
+    // erroneously reset bankScannedThisOpen and allow a second scan mid-session.
+    private int bankClosedTickCount = 0;
+
+    // Monotonically-increasing counter incremented on every syncItems() call.
+    // The removeItemsMissingFromBank callback captures the value at dispatch time
+    // and only executes if no newer scan has started — prevents stale callbacks
+    // from deleting rows that a later scan just upserted.
+    private volatile int bankScanGeneration = 0;
+
     // Most recent inventory coin balance — kept in sync so we can add it to bank coins on scan
     private int cachedInventoryCoins = 0;
 
-    public BankTracker(SupabaseClient supabase, RuneVaultConfig config, ItemManager itemManager, Consumer<String> chatMessage)
+    public BankTracker(SupabaseClient supabase, RuneVaultConfig config, ItemManager itemManager, Consumer<String> chatMessage, Client client)
     {
         this.supabase = supabase;
         this.config = config;
         this.itemManager = itemManager;
         this.chatMessage = chatMessage;
+        this.client = client;
     }
 
     /**
-     * Fires when any widget is loaded. We detect the bank opening here.
+     * Called from RuneVaultPlugin.onGameTick so BankTracker can detect when the bank
+     * widget closes (widget returns null) and reset the scan-guard for the next open.
      */
+    public void checkBankClosed(net.runelite.api.Client client)
+    {
+        if (!bankScannedThisOpen)
+        {
+            bankClosedTickCount = 0;
+            return;
+        }
+        if (client.getWidget(BANK_WIDGET_GROUP_ID, 0) == null)
+        {
+            bankClosedTickCount++;
+            if (bankClosedTickCount >= 2)
+            {
+                log.debug("[RuneVault] Bank closed — resetting scan guard (closedTicks={})", bankClosedTickCount);
+                bankScannedThisOpen = false;
+                bankOpenPending     = false;
+                bankClosedTickCount = 0;
+            }
+        }
+        else
+        {
+            // Widget visible again — was just a tab transition, not a real close
+            bankClosedTickCount = 0;
+        }
+    }
+
     public void onWidgetLoaded(WidgetLoaded event)
     {
-        log.debug("[RuneVault] onWidgetLoaded groupId={} bankScanEnabled={}", event.getGroupId(), config.bankScanEnabled());
+        log.debug("[RuneVault] onWidgetLoaded groupId={} bankScanEnabled={} scannedThisOpen={}",
+            event.getGroupId(), config.bankScanEnabled(), bankScannedThisOpen);
         if (!config.bankScanEnabled()) return;
         if (event.getGroupId() == BANK_WIDGET_GROUP_ID)
         {
+            if (bankScannedThisOpen)
+            {
+                // Tab switch or widget refresh — ignore to prevent partial re-scan
+                log.debug("[RuneVault] Bank WidgetLoaded ignored — already scanned this open session (tab switch?)");
+                return;
+            }
             log.debug("[RuneVault] Bank widget detected — setting bankOpenPending=true");
             bankOpenPending = true;
         }
@@ -75,7 +129,11 @@ public class BankTracker
         if (!bankOpenPending) return;
         if (event.getContainerId() != InventoryID.BANK.getId()) return;
 
-        bankOpenPending = false;
+        // In modern OSRS the bank sends ALL items to the client on open regardless of which
+        // tab is displayed — tabs are purely a visual filter on the client side.
+        // No need to enforce tab 0; scan immediately on the first container event.
+        bankOpenPending     = false;
+        bankScannedThisOpen = true; // block re-scans until bank closes
 
         ItemContainer container = event.getItemContainer();
         if (container == null) return;
@@ -152,20 +210,42 @@ public class BankTracker
     {
         if (!supabase.isProfileReady())
         {
+            // Reset the scan guard so the player can close and reopen the bank to retry
+            // once profile resolution completes (usually within 1-2s of login).
+            bankScannedThisOpen = false;
             log.warn("[RuneVault] Bank sync skipped — profile not yet confirmed for this character.");
-            chatMessage.accept("<col=ff6060>Bank sync skipped</col> \u2014 not yet connected. Link via the Rune Vault panel.");
+            chatMessage.accept("<col=ff6060>Bank sync skipped</col> \u2014 still loading your character. Close and reopen the bank to sync.");
             return;
         }
-        log.debug("[RuneVault] Syncing {} bank items ({} placeholders skipped)",
-            result.items.size(), result.placeholderCount);
-        supabase.bulkUpsertItems(result.items);
 
-        if (config.bankRemoveMissing())
-        {
-            java.util.Set<Integer> bankItemIds = new java.util.HashSet<>();
-            for (PortfolioItem item : result.items) bankItemIds.add(item.getItemId());
-            supabase.removeItemsMissingFromBank(bankItemIds);
-        }
+        // Increment generation so any in-flight callback from a previous scan
+        // knows it is stale and should not delete rows from the new scan.
+        final int thisGeneration = ++bankScanGeneration;
+
+        log.debug("[RuneVault] Syncing {} bank items ({} placeholders skipped) gen={}",
+            result.items.size(), result.placeholderCount, thisGeneration);
+
+        // Build the ID set before the async call so it's captured in the lambda below.
+        final java.util.Set<Integer> bankItemIds = new java.util.HashSet<>();
+        for (PortfolioItem item : result.items) bankItemIds.add(item.getItemId());
+
+        // Chain removeItemsMissingFromBank as the upsert's onSuccess callback so it only
+        // runs AFTER the upsert has landed in the DB — prevents the race where deletes
+        // fire before inserts complete and cause items to temporarily vanish in the app.
+        // Guard with the generation counter: if a newer scan has already started by the
+        // time this callback fires, skip the delete to avoid wiping the new scan's rows.
+        Runnable afterUpsert = config.bankRemoveMissing()
+            ? () -> {
+                if (bankScanGeneration != thisGeneration)
+                {
+                    log.debug("[RuneVault] Skipping stale removeItemsMissingFromBank (gen {} superseded by gen {})",
+                        thisGeneration, bankScanGeneration);
+                    return;
+                }
+                supabase.removeItemsMissingFromBank(bankItemIds);
+              }
+            : null;
+        supabase.bulkUpsertItems(result.items, "runelite", afterUpsert);
 
         if (config.syncCash())
         {
@@ -189,48 +269,65 @@ public class BankTracker
         // LinkedHashMap preserves insertion order and accumulates quantity per canonical ID
         Map<Integer, PortfolioItem> byId = new LinkedHashMap<>();
         int placeholderCount = 0;
+        int emptyCount = 0;
+        int coinsCount = 0;
 
         for (Item item : container.getItems())
         {
-            if (item.getId() <= 0 || item.getId() == COINS_ID) continue;
-            if (item.getQuantity() <= 0) continue; // empty slots
+            if (item.getId() <= 0) { emptyCount++; continue; }
+            if (item.getId() == COINS_ID) { coinsCount++; continue; }
+            if (item.getQuantity() <= 0)
+            {
+                log.info("[RuneVault][BankSkip] reason=qty<=0  rawId={} qty={} name={}",
+                    item.getId(), item.getQuantity(), itemManager.getItemComposition(item.getId()).getName());
+                continue;
+            }
 
             // Placeholders report quantity=1 but the item is not actually owned.
             // getPlaceholderTemplateId() returns 0 for real items, >0 for placeholders.
-            if (itemManager.getItemComposition(item.getId()).getPlaceholderTemplateId() > 0)
+            int placeholderTemplateId = itemManager.getItemComposition(item.getId()).getPlaceholderTemplateId();
+            if (placeholderTemplateId > 0)
             {
+                log.info("[RuneVault][BankSkip] reason=placeholder  rawId={} qty={} name={} templateId={}",
+                    item.getId(), item.getQuantity(), itemManager.getItemComposition(item.getId()).getName(), placeholderTemplateId);
                 placeholderCount++;
                 continue;
             }
 
+            // Store each item under its canonical ID (noted → unnoted) so every distinct
+            // bank slot gets its own row, matching how the OSRS bank itself shows items.
             int canonicalId = itemManager.canonicalize(item.getId());
             if (canonicalId <= 0) continue;
+
+            String rawName = itemManager.getItemComposition(item.getId()).getName();
 
             PortfolioItem existing = byId.get(canonicalId);
             if (existing != null)
             {
-                // Same item in multiple bank slots (e.g. noted + unnoted, or duplicate
-                // untradeable like Fire cape) — sum the quantities.
+                // Same canonical ID across multiple slots (noted + unnoted, split stack) — merge.
                 byId.put(canonicalId, new PortfolioItem(
                     canonicalId,
                     existing.getItemName(),
                     existing.getQuantity() + item.getQuantity(),
-                    0,
+                    existing.getBuyPrice(),
                     existing.getImageUrl(),
                     existing.getHaPrice()
                 ));
             }
             else
             {
-                net.runelite.api.ItemComposition comp = itemManager.getItemComposition(canonicalId);
-                String rawName  = comp.getName();
+                int[] prices    = PriceUtil.resolvePrices(canonicalId, itemManager);
+                int buyPrice    = prices[0];
+                int haPrice     = prices[1];
                 String nameLower = rawName.toLowerCase();
-                String name     = nameLower.endsWith(" (members)") ? rawName.substring(0, rawName.length() - 10) : rawName;
-                String imageUrl = "https://static.runelite.net/cache/item/icon/" + canonicalId + ".png";
-                int haPrice     = (int) Math.floor(comp.getPrice() * 0.6);
-                byId.put(canonicalId, new PortfolioItem(canonicalId, name, item.getQuantity(), 0, imageUrl, haPrice));
+                String name      = nameLower.endsWith(" (members)") ? rawName.substring(0, rawName.length() - 10) : rawName;
+                String imageUrl  = "https://static.runelite.net/cache/item/icon/" + canonicalId + ".png";
+                byId.put(canonicalId, new PortfolioItem(canonicalId, name, item.getQuantity(), buyPrice, imageUrl, haPrice));
             }
         }
+
+        log.info("[RuneVault][BankScan] done: {} items, {} placeholders, {} empty, {} coin slots",
+            byId.size(), placeholderCount, emptyCount, coinsCount);
 
         return new ScanResult(new ArrayList<>(byId.values()), placeholderCount);
     }

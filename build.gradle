@@ -47,9 +47,13 @@ test {
 tasks.register('run', JavaExec) {
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.runevault.RuneVaultPluginTest'
-    jvmArgs '-ea',
-            '--add-opens=java.desktop/com.apple.eawt=ALL-UNNAMED',
+    def jvmArgsList = ['-ea',
             '--add-opens=java.base/java.net=ALL-UNNAMED',
-            '--add-opens=java.base/java.io=ALL-UNNAMED'
+            '--add-opens=java.base/java.io=ALL-UNNAMED']
+    // Mac-only: RuneLite uses Apple dock APIs not present on other platforms
+    if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+        jvmArgsList += '--add-opens=java.desktop/com.apple.eawt=ALL-UNNAMED'
+    }
+    jvmArgs jvmArgsList
     args '--developer-mode'
 }

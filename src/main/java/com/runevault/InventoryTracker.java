@@ -8,7 +8,9 @@ import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.client.game.ItemManager;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Slf4j
@@ -33,6 +35,9 @@ public class InventoryTracker
     // Track if the next inventory change was caused by a drop action
     private boolean pendingDrop = false;
     private int pendingDropItemId = -1;
+
+    // Last known equipment snapshot — used to avoid redundant re-uploads
+    private final Map<Integer, Integer> lastEquipment = new HashMap<>();
 
     public InventoryTracker(SupabaseClient supabase, RuneVaultConfig config, ItemManager itemManager)
     {
@@ -64,9 +69,16 @@ public class InventoryTracker
 
     /**
      * Main inventory diff — fires on every inventory change.
+     * Also handles equipment container changes to keep the equipped-items snapshot current.
      */
     public void onItemContainerChanged(ItemContainerChanged event)
     {
+        if (event.getContainerId() == InventoryID.EQUIPMENT.getId())
+        {
+            syncEquipment(event.getItemContainer());
+            return;
+        }
+
         if (event.getContainerId() != InventoryID.INVENTORY.getId()) return;
 
         ItemContainer container = event.getItemContainer();
@@ -170,11 +182,64 @@ public class InventoryTracker
         // Only act on explicit drops (not inventory rearrangement, equipping, etc.)
         if (pendingDrop && pendingDropItemId == itemId)
         {
-            String itemName = itemManager.getItemComposition(itemId).getName();
+            int canonicalId = itemManager.canonicalize(itemId);
+            String itemName = itemManager.getItemComposition(canonicalId).getName();
             log.debug("[RuneVault] Dropped: " + quantity + "x " + itemName);
-            supabase.decrementItem(itemId, quantity);
+            supabase.decrementItem(canonicalId, quantity);
         }
         // Note: GE sales are handled by GETracker, not here
+    }
+
+    /**
+     * Syncs the player's currently equipped items to Supabase as source="runelite_equip".
+     * Only uploads when the equipment actually changes (compared to lastEquipment snapshot).
+     */
+    private void syncEquipment(ItemContainer container)
+    {
+        if (container == null) return;
+        if (!supabase.isProfileReady()) return;
+
+        Map<Integer, Integer> current = buildMap(container);
+
+        // Skip upload if nothing changed since last sync
+        if (current.equals(lastEquipment)) return;
+        lastEquipment.clear();
+        lastEquipment.putAll(current);
+
+        if (current.isEmpty())
+        {
+            // Nothing equipped — clear any stale rows
+            supabase.clearEquipmentItems();
+            return;
+        }
+
+        List<PortfolioItem> items = new ArrayList<>();
+        for (Map.Entry<Integer, Integer> entry : current.entrySet())
+        {
+            int rawId = entry.getKey();
+            if (rawId == COINS_ID) continue;
+
+            int canonicalId  = itemManager.canonicalize(rawId);
+            if (canonicalId <= 0) continue;
+
+            int[] prices    = PriceUtil.resolvePrices(canonicalId, itemManager);
+            int buyPrice    = prices[0];
+            int haPrice     = prices[1];
+
+            net.runelite.api.ItemComposition comp = itemManager.getItemComposition(canonicalId);
+            String rawName   = comp.getName();
+            String nameLower = rawName.toLowerCase();
+            String name      = nameLower.endsWith(" (members)") ? rawName.substring(0, rawName.length() - 10) : rawName;
+            String imageUrl  = "https://static.runelite.net/cache/item/icon/" + canonicalId + ".png";
+
+            items.add(new PortfolioItem(canonicalId, name, entry.getValue(), buyPrice, imageUrl, haPrice));
+        }
+
+        if (!items.isEmpty())
+        {
+            log.debug("[RuneVault] Syncing {} equipped items", items.size());
+            supabase.bulkUpsertItems(items, "runelite_equip", null);
+        }
     }
 
     /**
@@ -183,6 +248,7 @@ public class InventoryTracker
     public void reset()
     {
         lastInventory.clear();
+        lastEquipment.clear();
         initialLoad = true;
         pendingPickup = false;
         pendingPickupItemId = -1;

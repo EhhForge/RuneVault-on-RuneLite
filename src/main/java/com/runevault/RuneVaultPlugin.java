@@ -68,9 +68,13 @@ public class RuneVaultPlugin extends Plugin
     protected void startUp()
     {
         supabase = new SupabaseClient(okHttpClient, gson, config);
+        supabase.setOnSessionLost(() -> {
+            SwingUtilities.invokeLater(() -> panel.setDisconnected());
+            showChatMessage("<col=ff6060>Session expired</col> \u2014 please re-link via the Rune Vault panel.");
+        });
         geTracker = new GETracker(supabase, config, itemManager);
         inventoryTracker = new InventoryTracker(supabase, config, itemManager);
-        bankTracker = new BankTracker(supabase, config, itemManager, this::showChatMessage);
+        bankTracker = new BankTracker(supabase, config, itemManager, this::showChatMessage, client);
 
         // Build the side panel
         panel = new RuneVaultPanel(e -> handlePanelConnect(), e -> handlePanelDisconnect(), config,
@@ -96,7 +100,17 @@ public class RuneVaultPlugin extends Plugin
                 {
                     config.setConnectionStatus("Connected \u2713");
                     panel.setConnected(lastPlayerName);
-                    supabase.setPluginActive(true);
+                    // setPluginActive(true) is called inside initFromStoredToken when a
+                    // lastProfileId is known, so we don't call it here (avoids activating
+                    // the wrong profile before the RS username is resolved).
+                    // If the player is not in-game (e.g. on the login/loading screen),
+                    // clear plugin_active so the app shows the correct idle state.
+                    clientThread.invokeLater(() -> {
+                        if (client.getGameState() != GameState.LOGGED_IN)
+                        {
+                            linkCodePoller.execute(() -> supabase.onPlayerLogout());
+                        }
+                    });
                     showSyncWarningIfNeeded();
                 }
                 else
@@ -262,14 +276,16 @@ public class RuneVaultPlugin extends Plugin
                 log.info("[RuneVault] Linked successfully via panel.");
                 // Stop the link-code checkbox poller — no longer needed after successful link
                 if (linkCodePollerFuture != null) linkCodePollerFuture.cancel(false);
-                // If the player is already in-game, switch/confirm profile immediately
-                // without waiting for the next GameState.LOGGED_IN event.
-                if (lastPlayerName != null)
-                {
-                    final String name = lastPlayerName;
-                    linkCodePoller.execute(() -> supabase.switchProfileForUsername(name));
-                }
-                supabase.setPluginActive(true);
+                // If the player is currently in-game, switch profile immediately.
+                // Use clientThread to safely read game state, then dispatch to linkCodePoller.
+                // Guard against stale lastPlayerName from a previous login session.
+                clientThread.invokeLater(() -> {
+                    if (client.getGameState() == GameState.LOGGED_IN && lastPlayerName != null)
+                    {
+                        final String name = lastPlayerName;
+                        linkCodePoller.execute(() -> supabase.switchProfileForUsername(name));
+                    }
+                });
             }
             else
             {
@@ -296,12 +312,14 @@ public class RuneVaultPlugin extends Plugin
     @Override
     protected void shutDown()
     {
-        // Mark plugin as inactive before tearing down so the app sees it immediately
-        if (supabase != null) supabase.setPluginActive(false);
+        // Submit setPluginActive(false) to the executor before shutting it down so the HTTP
+        // call runs off the EDT. shutdown() (graceful) lets the queued task complete first.
+        if (supabase != null && linkCodePoller != null)
+            linkCodePoller.execute(() -> supabase.setPluginActive(false));
 
         if (linkCodePoller != null)
         {
-            linkCodePoller.shutdownNow();
+            linkCodePoller.shutdown();
             linkCodePoller = null;
         }
         if (navButton != null)
@@ -326,17 +344,37 @@ public class RuneVaultPlugin extends Plugin
             // onGameTick will resolve it on the first tick.
             playerNamePending = true;
         }
-        else if (event.getGameState() == GameState.LOGIN_SCREEN)
+        else if (event.getGameState() == GameState.LOGIN_SCREEN
+              || event.getGameState() == GameState.LOADING
+              || event.getGameState() == GameState.CONNECTION_LOST)
         {
             geTracker.reset();
             playerNamePending = false;
-            lastPlayerName = null; // reset so the connected message shows on next genuine login
+            if (event.getGameState() == GameState.LOGIN_SCREEN
+             || event.getGameState() == GameState.CONNECTION_LOST)
+            {
+                lastPlayerName = null; // reset so the connected message shows on next genuine login
+            }
+            if (supabase.isAuthenticated())
+            {
+                // Player logged out, is on the loading/connecting screen, or lost connection —
+                // turn off the green dot in the app and stop heartbeats until they fully log in.
+                // Clear equipped items (they're ephemeral — player is no longer wearing them).
+                // Profile will be re-resolved when they log in again via switchProfileForUsername.
+                linkCodePoller.execute(() -> {
+                    supabase.clearEquipmentItems();
+                    supabase.onPlayerLogout();
+                });
+            }
         }
     }
 
     @Subscribe
     public void onGameTick(GameTick event)
     {
+        // Let BankTracker detect when the bank widget closes so it can allow the next genuine open
+        bankTracker.checkBankClosed(client);
+
         if (!playerNamePending) return;
         String playerName = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;
         if (playerName == null) return; // still loading — try again next tick
@@ -346,7 +384,7 @@ public class RuneVaultPlugin extends Plugin
         lastPlayerName = playerName;
         panel.updatePlayerName(playerName);
 
-        if (supabase.isAuthenticated())
+        if (!config.authToken().isEmpty())
         {
             final String name = playerName;
             // Only show the connected message on a genuine login, not on instance/area changes
@@ -354,6 +392,8 @@ public class RuneVaultPlugin extends Plugin
             {
                 showChatMessage("<col=00c060>Connected</col> as <col=e8a060>" + name + "</col> \u2014 syncing to Rune Vault.");
             }
+            // switchProfileForUsername calls ensureAuthenticated() internally — token refresh
+            // is handled there, so we only need to confirm credentials exist at all.
             linkCodePoller.execute(() -> supabase.switchProfileForUsername(name));
         }
     }

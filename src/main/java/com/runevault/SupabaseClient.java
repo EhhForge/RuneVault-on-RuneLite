@@ -32,6 +32,12 @@ public class SupabaseClient
 
     public boolean isProfileReady() { return profileReady; }
 
+    // Fired when the session is permanently lost (refresh token expired / revoked).
+    // The plugin uses this to update the panel and show a chat message.
+    private Runnable onSessionLost = null;
+
+    public void setOnSessionLost(Runnable callback) { this.onSessionLost = callback; }
+
     public SupabaseClient(OkHttpClient httpClient, Gson gson, RuneVaultConfig config)
     {
         this.httpClient = httpClient;
@@ -97,21 +103,24 @@ public class SupabaseClient
             String accessToken  = accessTokenEl.getAsString();
             String refreshToken = refreshTokenEl.getAsString();
             String userId       = userIdEl.getAsString();
-            String profileId    = json.has("profileId") && !json.get("profileId").isJsonNull()
-                ? json.get("profileId").getAsString() : null;
+            // profileId from the link code is intentionally ignored — the correct profile
+            // is always resolved from the logged-in RS username via switchProfileForUsername().
+            // This ensures bank syncs always target the right character, regardless of which
+            // profile was active in the mobile app when the link code was generated.
 
             config.setAuthToken(accessToken);
             config.setRefreshToken(refreshToken);
             config.setLinkedUserId(userId);
             config.setLinkCode(""); // clear one-time code — it's been consumed
 
-            cachedUserId   = userId;
-            cachedProfileId = profileId;
+            cachedUserId    = userId;
+            cachedProfileId = null; // remains null until switchProfileForUsername() resolves it
+            profileReady    = false;
 
-            if (cachedProfileId == null)
-            {
-                fetchAndCacheProfile();
-            }
+            // Reset plugin state so the app shows "Waiting for first heartbeat" instead
+            // of "Plugin Inactive/Disconnected" from a stale previous session.
+            // plugin_active = true fires later once the RS username is resolved.
+            resetPluginStateForUser(userId);
 
             log("RuneLite plugin linked successfully. User: " + userId);
             return true;
@@ -156,7 +165,26 @@ public class SupabaseClient
         {
             cachedUserId = userId;
             log("Session restored. User: " + cachedUserId);
-            fetchAndCacheProfile();
+            // Clear any stale disconnect flag from a previous session so the
+            // 10s checkRemoteDisconnect poll doesn't immediately self-disconnect.
+            clearDisconnectFlagForUser(userId);
+
+            // If we know the last-used profile from a previous session, use it immediately.
+            // This allows heartbeating to the correct character before login completes,
+            // rather than defaulting to whatever profile is first in the DB (wrong character).
+            String lastProfileId = config.lastProfileId();
+            if (!lastProfileId.isEmpty())
+            {
+                cachedProfileId = lastProfileId;
+                profileReady = true; // safe — this is the profile we last verified
+                log("Restored last profile: " + cachedProfileId);
+                fetchAndCacheCash(); // pre-warm coin tracking
+                setPluginActive(true); // show connected immediately in the app
+            }
+            else
+            {
+                fetchAndCacheProfile(); // first-run fallback
+            }
         }
         else
         {
@@ -230,6 +258,17 @@ public class SupabaseClient
     }
 
     /**
+     * Returns cachedProfileId if authenticated (refreshing the token if needed), null otherwise.
+     * Synchronized so the null-check, token refresh, and ID capture are all atomic — callers
+     * capture the return value into a local variable to avoid TOCTOU races with disconnect().
+     */
+    private synchronized String getAuthenticatedProfileId()
+    {
+        if (cachedProfileId == null || !ensureAuthenticated()) return null;
+        return cachedProfileId;
+    }
+
+    /**
      * Returns true if we have a valid access token, silently refreshing it if expired.
      * Synchronized so concurrent sync calls don't all fire a refresh at once.
      */
@@ -240,8 +279,13 @@ public class SupabaseClient
         boolean ok = refreshAccessToken();
         if (!ok)
         {
-            log("Token refresh failed — please re-link via the Rune Vault panel.");
+            log("Token refresh failed — session lost. Please re-link via the Rune Vault panel.");
             clearStoredCredentials();
+            cachedCashTotal = -1;
+            profileReady    = false;
+            config.setLastProfileId("");
+            config.setConnectionStatus("Session expired — re-link in Settings");
+            if (onSessionLost != null) onSessionLost.run();
         }
         return ok;
     }
@@ -272,12 +316,46 @@ public class SupabaseClient
     public void disconnect()
     {
         profileReady = false;
-        setPluginActive(false); // tell the app before wiping the token
+        // Build a full explicit-disconnect patch: clear active, stamp last_seen=null so the app
+        // knows this is a real disconnect (not just a character logout), and set the disconnect
+        // flag so the app collapses the plugin panel immediately.
+        if (cachedUserId != null && isAuthenticated())
+        {
+            JsonObject body = new JsonObject();
+            body.addProperty("plugin_active", false);
+            body.addProperty("plugin_disconnect_requested", true);
+            body.add("plugin_last_seen", com.google.gson.JsonNull.INSTANCE); // nulls last_seen → not 'idle'
+            String url = cachedProfileId != null
+                ? SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId
+                : SUPABASE_URL + "/rest/v1/profiles?user_id=eq." + cachedUserId;
+            Request request = new Request.Builder()
+                .url(url)
+                .patch(RequestBody.create(JSON, gson.toJson(body)))
+                .addHeader("apikey", ANON_KEY)
+                .addHeader("Authorization", "Bearer " + config.authToken())
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Prefer", "return=minimal")
+                .build();
+            // Synchronous — must complete before credentials are cleared and before any
+            // subsequent exchangeLinkCode() call runs. Both are queued on the same
+            // single-thread executor, so making this sync guarantees ordering:
+            // old disconnect lands in DB → then new link code exchange starts.
+            // If async, the stale PATCH can arrive after resetPluginStateForUser() and
+            // re-set plugin_disconnect_requested=true, causing an immediate auto-disconnect.
+            try (Response r = httpClient.newCall(request).execute()) {
+                if (!r.isSuccessful()) log("disconnectByUser failed: HTTP " + r.code());
+                else                   log("disconnectByUser OK");
+            } catch (IOException e) {
+                log("disconnectByUser error: " + e.getMessage());
+            }
+        }
         clearStoredCredentials();
         cachedUserId    = null;
         cachedProfileId = null;
         cachedCashTotal = -1;
+        profileReady    = false;
         config.setLinkCode("");
+        config.setLastProfileId(""); // clear so next link starts fresh
         config.setConnectionStatus("Not connected");
         log("Disconnected from Rune Vault.");
     }
@@ -288,12 +366,32 @@ public class SupabaseClient
      */
     public void setPluginActive(boolean active)
     {
-        if (cachedProfileId == null || !isAuthenticated()) return;
+        if (cachedProfileId == null || !ensureAuthenticated()) return;
+
+        // When activating, clear plugin_active on all other profiles first so the green dot
+        // never appears on the wrong character in the app.
+        if (active && cachedUserId != null)
+        {
+            JsonObject clearBody = new JsonObject();
+            clearBody.addProperty("plugin_active", false);
+            Request clearRequest = new Request.Builder()
+                .url(SUPABASE_URL + "/rest/v1/profiles?user_id=eq." + cachedUserId + "&id=neq." + cachedProfileId)
+                .patch(RequestBody.create(JSON, gson.toJson(clearBody)))
+                .addHeader("apikey",        ANON_KEY)
+                .addHeader("Authorization", "Bearer " + config.authToken())
+                .addHeader("Content-Type",  "application/json")
+                .addHeader("Prefer",        "return=minimal")
+                .build();
+            executeAsync(clearRequest, "clearOtherActiveProfiles");
+        }
 
         JsonObject body = new JsonObject();
         body.addProperty("plugin_active", active);
-        if (active) body.addProperty("plugin_last_seen",
-            java.time.Instant.now().toString());
+        if (active) {
+            body.addProperty("plugin_last_seen", java.time.Instant.now().toString());
+            // Clear any stale disconnect flag so a restart doesn't immediately re-trigger
+            body.addProperty("plugin_disconnect_requested", false);
+        }
 
         Request request = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId)
@@ -319,16 +417,70 @@ public class SupabaseClient
      * Lightweight heartbeat — updates plugin_last_seen so the app can detect
      * crashes vs explicit disconnects. Called every 2 minutes by the plugin.
      */
+    /**
+     * Called when the player logs out to the login screen.
+     * Clears plugin_active so the green dot disappears in the app immediately,
+     * and stops heartbeats until the player logs back in.
+     */
+    public void onPlayerLogout()
+    {
+        profileReady = false; // stop heartbeats — no character is logged in
+        final String profileId = cachedProfileId;
+        if (profileId == null || !isAuthenticated()) return;
+
+        // Set plugin_active=false AND stamp plugin_last_seen=now so the app can
+        // distinguish "character logged out" (recent last_seen) from
+        // "plugin crashed/disconnected" (stale last_seen).
+        JsonObject body = new JsonObject();
+        body.addProperty("plugin_active",    false);
+        body.addProperty("plugin_last_seen", java.time.Instant.now().toString());
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + profileId)
+            .patch(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
+            .addHeader("Prefer",        "return=minimal")
+            .build();
+
+        executeAsync(request, "playerLogout");
+    }
+
     public void sendHeartbeat()
     {
-        if (cachedProfileId == null || !ensureAuthenticated()) return;
+        // If logged out but still authenticated with a known profile, send a keep-alive
+        // so plugin_last_seen stays fresh and the app shows "Character Logged Out"
+        // instead of "Plugin Disconnected" after the 10-minute staleness threshold.
+        if (!profileReady)
+        {
+            final String profileId = cachedProfileId;
+            if (profileId == null || !ensureAuthenticated()) return;
+            JsonObject body = new JsonObject();
+            body.addProperty("plugin_last_seen", java.time.Instant.now().toString());
+            Request request = new Request.Builder()
+                .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + profileId)
+                .patch(RequestBody.create(JSON, gson.toJson(body)))
+                .addHeader("apikey",        ANON_KEY)
+                .addHeader("Authorization", "Bearer " + config.authToken())
+                .addHeader("Content-Type",  "application/json")
+                .addHeader("Prefer",        "return=minimal")
+                .build();
+            executeAsync(request, "heartbeat-idle");
+            return;
+        }
+
+        // Only heartbeat plugin_active=true after switchProfileForUsername has confirmed
+        // the correct character — prevents heartbeating the wrong profile on startup.
+        final String profileId = getAuthenticatedProfileId();
+        if (profileId == null) return;
 
         JsonObject body = new JsonObject();
         body.addProperty("plugin_active",    true);
         body.addProperty("plugin_last_seen", java.time.Instant.now().toString());
 
         Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId)
+            .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + profileId)
             .patch(RequestBody.create(JSON, gson.toJson(body)))
             .addHeader("apikey",        ANON_KEY)
             .addHeader("Authorization", "Bearer " + config.authToken())
@@ -346,10 +498,13 @@ public class SupabaseClient
      */
     public boolean checkRemoteDisconnect()
     {
-        if (cachedProfileId == null || !ensureAuthenticated()) return false;
+        // Always check by user_id — the app patches all profiles for the user on disconnect,
+        // so checking by cachedProfileId would miss the flag if the active profile differs.
+        if (cachedUserId == null || !isAuthenticated()) return false;
+        final String filterClause = "user_id=eq." + cachedUserId;
 
         Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId
+            .url(SUPABASE_URL + "/rest/v1/profiles?" + filterClause
                 + "&select=plugin_disconnect_requested")
             .get()
             .addHeader("apikey",        ANON_KEY)
@@ -363,16 +518,23 @@ public class SupabaseClient
             String body = response.body().string();
             com.google.gson.JsonArray arr = new JsonParser().parse(body).getAsJsonArray();
             if (arr.size() == 0) return false;
-            JsonObject row = arr.get(0).getAsJsonObject();
-            if (!row.has("plugin_disconnect_requested")) return false;
-            boolean requested = row.get("plugin_disconnect_requested").getAsBoolean();
+            // Check if ANY profile has the flag set (user may have multiple profiles)
+            boolean requested = false;
+            for (int i = 0; i < arr.size(); i++) {
+                JsonObject row = arr.get(i).getAsJsonObject();
+                if (row.has("plugin_disconnect_requested")
+                        && row.get("plugin_disconnect_requested").getAsBoolean()) {
+                    requested = true;
+                    break;
+                }
+            }
             if (!requested) return false;
 
             // Clear the flag immediately so it doesn't fire again on next poll
             JsonObject clear = new JsonObject();
             clear.addProperty("plugin_disconnect_requested", false);
             Request clearReq = new Request.Builder()
-                .url(SUPABASE_URL + "/rest/v1/profiles?id=eq." + cachedProfileId)
+                .url(SUPABASE_URL + "/rest/v1/profiles?" + filterClause)
                 .patch(RequestBody.create(JSON, gson.toJson(clear)))
                 .addHeader("apikey",        ANON_KEY)
                 .addHeader("Authorization", "Bearer " + config.authToken())
@@ -399,12 +561,18 @@ public class SupabaseClient
      */
     public void upsertItem(PortfolioItem item)
     {
+        upsertItem(item, 2);
+    }
+
+    private void upsertItem(PortfolioItem item, int retriesLeft)
+    {
         if (!ensureAuthenticated()) return;
         if (!hasProfile()) { log("upsertItem skipped — no profile loaded yet"); return; }
 
         Request fetchRequest = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/portfolio_items"
                 + "?user_id=eq." + getUserId()
+                + "&profile_id=eq." + cachedProfileId
                 + "&item_id=eq." + item.getItemId()
                 + "&game=eq.osrs"
                 + "&select=id,quantity,buy_price")
@@ -418,8 +586,17 @@ public class SupabaseClient
             @Override
             public void onFailure(Call call, IOException e)
             {
-                log("upsertItem fetch error: " + e.getMessage());
-                doUpsertItem(item, item.getQuantity(), item.getBuyPrice());
+                if (retriesLeft > 0)
+                {
+                    int attempt = 3 - retriesLeft;
+                    log("upsertItem fetch error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
+                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                    upsertItem(item, retriesLeft - 1);
+                }
+                else
+                {
+                    log("upsertItem fetch failed after all retries: " + e.getMessage());
+                }
             }
 
             @Override
@@ -474,7 +651,7 @@ public class SupabaseClient
         if (item.getImageUrl() != null) body.addProperty("image_url", item.getImageUrl());
 
         Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,item_id,game")
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,profile_id,item_id,game,source")
             .post(RequestBody.create(JSON, gson.toJson(body)))
             .addHeader("apikey",         ANON_KEY)
             .addHeader("Authorization",  "Bearer " + config.authToken())
@@ -500,6 +677,7 @@ public class SupabaseClient
         Request fetchRequest = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/portfolio_items"
                 + "?user_id=eq." + getUserId()
+                + "&profile_id=eq." + cachedProfileId
                 + "&item_id=eq." + itemId
                 + "&game=eq.osrs"
                 + "&select=id,quantity")
@@ -601,7 +779,13 @@ public class SupabaseClient
     // Bank scan — bulk upsert
     // -------------------------------------------------------------------------
 
-    public void bulkUpsertItems(java.util.List<PortfolioItem> items)
+    /**
+     * Bulk upsert items with an explicit source and an optional callback.
+     * The callback runs on the OkHttp thread after the request succeeds — use it to
+     * chain dependent operations (e.g. removeItemsMissingFromBank) so they only run
+     * after the upsert has landed in the DB, avoiding race conditions.
+     */
+    public void bulkUpsertItems(java.util.List<PortfolioItem> items, String source, Runnable onSuccess)
     {
         if (!ensureAuthenticated() || items.isEmpty()) return;
         if (!hasProfile()) { log("bulkUpsert skipped — profile not loaded yet"); return; }
@@ -622,20 +806,26 @@ public class SupabaseClient
             obj.addProperty("buy_price",  item.getBuyPrice());
             obj.addProperty("ha_price",   item.getHaPrice());
             obj.addProperty("watchlisted", false);
-            obj.addProperty("source",     "runelite");
+            obj.addProperty("source",     source);
             // Intentionally omitting last_added_at and buy_date — bank scans should not
             // update these fields on existing rows, keeping GE/pickup timestamps intact.
-            // New rows (first bank scan) will have null, so they won't appear in Latest Added.
             if (item.getImageUrl() != null) obj.addProperty("image_url", item.getImageUrl());
             body.add(obj);
         }
 
-        String prefer = config.bankOverwriteDuplicates()
-            ? "resolution=merge-duplicates,return=minimal"
-            : "resolution=ignore-duplicates,return=minimal";
+        // Equipment snapshots always overwrite (quantity and price may change on re-equip).
+        // Bank scans respect the bankOverwriteDuplicates config.
+        String prefer;
+        if ("runelite_equip".equals(source)) {
+            prefer = "resolution=merge-duplicates,return=minimal";
+        } else {
+            prefer = config.bankOverwriteDuplicates()
+                ? "resolution=merge-duplicates,return=minimal"
+                : "resolution=ignore-duplicates,return=minimal";
+        }
 
         Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,item_id,game")
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,profile_id,item_id,game,source")
             .post(RequestBody.create(JSON, gson.toJson(body)))
             .addHeader("apikey",        ANON_KEY)
             .addHeader("Authorization", "Bearer " + config.authToken())
@@ -643,7 +833,27 @@ public class SupabaseClient
             .addHeader("Prefer",        prefer)
             .build();
 
-        executeAsync(request, "bulkUpsert(" + items.size() + " items)");
+        executeAsync(request, "bulkUpsert(" + items.size() + " items, source=" + source + ")", onSuccess);
+    }
+
+    /**
+     * Removes all equipment-snapshot items for the current profile.
+     * Called on player logout so stale equipped items don't persist between sessions.
+     */
+    public void clearEquipmentItems()
+    {
+        if (!ensureAuthenticated() || !hasProfile()) return;
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items"
+                + "?user_id=eq." + getUserId()
+                + "&profile_id=eq." + cachedProfileId
+                + "&source=eq.runelite_equip")
+            .delete()
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Prefer",        "return=minimal")
+            .build();
+        executeAsync(request, "clearEquipmentItems");
     }
 
     public void removeItemsMissingFromBank(java.util.Set<Integer> bankItemIds)
@@ -658,6 +868,7 @@ public class SupabaseClient
         Request fetchRequest = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/portfolio_items"
                 + "?user_id=eq." + getUserId()
+                + "&profile_id=eq." + cachedProfileId
                 + "&source=eq.runelite"
                 + "&game=eq.osrs"
                 + "&select=id,item_id")
@@ -691,6 +902,9 @@ public class SupabaseClient
                     if (!response.isSuccessful() || response.body() == null) return;
                     JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
 
+                    log.info("[RuneVault][RemoveMissing] DB rows fetched={}, bankItemIds size={}",
+                        rows.size(), bankItemIds.size());
+
                     java.util.List<String> missingIds = new java.util.ArrayList<>();
                     for (int i = 0; i < rows.size(); i++)
                     {
@@ -699,7 +913,7 @@ public class SupabaseClient
                         if (!bankItemIds.contains(itemId))
                         {
                             missingIds.add(row.get("id").getAsString());
-                            log("Removing missing bank item: item_id=" + itemId);
+                            log.info("[RuneVault][RemoveMissing] DELETE item_id={} (not in current bank scan)", itemId);
                         }
                     }
 
@@ -735,61 +949,98 @@ public class SupabaseClient
     public void switchProfileForUsername(String rsUsername)
     {
         if (cachedUserId == null || rsUsername == null || rsUsername.isEmpty()) return;
+        if (!ensureAuthenticated()) return; // refresh expired token before any HTTP calls
+        profileReady = false; // block bank/inventory syncs until correct profile is resolved
 
         String encoded;
         try { encoded = java.net.URLEncoder.encode(rsUsername, "UTF-8"); }
         catch (Exception e) { encoded = rsUsername; }
 
-        Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/profiles?user_id=eq." + cachedUserId
-                + "&name=ilike." + encoded
-                + "&select=id,name&limit=1")
-            .get()
-            .addHeader("apikey",        ANON_KEY)
-            .addHeader("Authorization", "Bearer " + config.authToken())
-            .build();
-
-        try (Response response = httpClient.newCall(request).execute())
+        // Two-query approach: prefer rs_username match (exact character) over name match.
+        // This prevents selecting a ghost profile whose name happens to equal the RS username
+        // when a correctly-tagged profile (rs_username=rsUsername) also exists.
+        String resolvedProfileId = null;
+        try
         {
-            if (!response.isSuccessful() || response.body() == null)
+            // Query 1: rs_username match (e.g. profile xxxxxxxx with rs_username=myusername)
+            Request rsRequest = new Request.Builder()
+                .url(SUPABASE_URL + "/rest/v1/profiles?user_id=eq." + cachedUserId
+                    + "&rs_username=ilike." + encoded
+                    + "&select=id,name&limit=1")
+                .get()
+                .addHeader("apikey",        ANON_KEY)
+                .addHeader("Authorization", "Bearer " + config.authToken())
+                .build();
+
+            try (Response rsResponse = httpClient.newCall(rsRequest).execute())
             {
-                log("switchProfile fetch failed: HTTP " + response.code());
-                return;
+                if (rsResponse.isSuccessful() && rsResponse.body() != null)
+                {
+                    JsonArray rows = gson.fromJson(rsResponse.body().string(), JsonArray.class);
+                    if (rows.size() > 0)
+                        resolvedProfileId = rows.get(0).getAsJsonObject().get("id").getAsString();
+                }
             }
 
-            JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
-            if (rows.size() > 0)
+            // Query 2: name match fallback (only if rs_username query found nothing)
+            if (resolvedProfileId == null)
             {
-                String profileId = rows.get(0).getAsJsonObject().get("id").getAsString();
-                if (!profileId.equals(cachedProfileId))
+                Request nameRequest = new Request.Builder()
+                    .url(SUPABASE_URL + "/rest/v1/profiles?user_id=eq." + cachedUserId
+                        + "&name=ilike." + encoded
+                        + "&select=id,name&limit=1")
+                    .get()
+                    .addHeader("apikey",        ANON_KEY)
+                    .addHeader("Authorization", "Bearer " + config.authToken())
+                    .build();
+
+                try (Response nameResponse = httpClient.newCall(nameRequest).execute())
                 {
-                    cachedProfileId = profileId;
-                    log("Switched to profile for " + rsUsername + " (" + cachedProfileId + ")");
+                    if (nameResponse.isSuccessful() && nameResponse.body() != null)
+                    {
+                        JsonArray rows = gson.fromJson(nameResponse.body().string(), JsonArray.class);
+                        if (rows.size() > 0)
+                            resolvedProfileId = rows.get(0).getAsJsonObject().get("id").getAsString();
+                    }
                 }
-                // Mark verified — this RuneLite session proves ownership of the RS account
-                markPluginVerified();
             }
-            else
-            {
-                log("No profile found for " + rsUsername + " — creating one.");
-                createProfileForUsername(rsUsername);
-            }
-            if (cachedProfileId != null) profileReady = true;
         }
         catch (IOException e)
         {
             log("switchProfile error: " + e.getMessage());
+            return;
+        }
+
+        if (resolvedProfileId != null)
+        {
+            if (!resolvedProfileId.equals(cachedProfileId))
+                log("Switched to profile for " + rsUsername + " (" + resolvedProfileId + ")");
+            cachedProfileId = resolvedProfileId;
+            config.setLastProfileId(resolvedProfileId); // persist for startup heartbeating
+            markPluginVerified();
+        }
+        else
+        {
+            log("No profile found for " + rsUsername + " — creating one.");
+            createProfileForUsername(rsUsername);
+        }
+
+        if (cachedProfileId != null)
+        {
+            profileReady = true;
+            setPluginActive(true); // now that we have the correct profile, mark as active in the app
         }
     }
 
     private void createProfileForUsername(String rsUsername)
     {
         JsonObject body = new JsonObject();
-        body.addProperty("id",      java.util.UUID.randomUUID().toString());
-        body.addProperty("user_id", cachedUserId);
-        body.addProperty("name",    rsUsername);
-        body.addProperty("game",    "osrs");
-        body.addProperty("color",   "#f0c040");
+        body.addProperty("id",          java.util.UUID.randomUUID().toString());
+        body.addProperty("user_id",     cachedUserId);
+        body.addProperty("name",        rsUsername);
+        body.addProperty("rs_username", rsUsername);
+        body.addProperty("game",        "osrs");
+        body.addProperty("color",       "#f0c040");
 
         Request request = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/profiles")
@@ -942,6 +1193,7 @@ public class SupabaseClient
         Request request = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/portfolio_items"
                 + "?user_id=eq." + getUserId()
+                + "&profile_id=eq." + cachedProfileId
                 + "&item_id=eq.995"
                 + "&game=eq.osrs"
                 + "&select=quantity"
@@ -962,6 +1214,57 @@ public class SupabaseClient
             }
         }
         catch (IOException e) { /* non-critical, will initialize on next bank open */ }
+    }
+
+    /**
+     * Clears only the disconnect flag on startup (token restore).
+     * Does NOT touch plugin_active — switchProfileForUsername will set that correctly.
+     */
+    private void clearDisconnectFlagForUser(String userId)
+    {
+        JsonObject body = new JsonObject();
+        body.addProperty("plugin_disconnect_requested", false);
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/profiles?user_id=eq." + userId)
+            .patch(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
+            .addHeader("Prefer",        "return=minimal")
+            .build();
+
+        executeAsync(request, "clearDisconnectFlag");
+    }
+
+    /**
+     * Called on new link code exchange — resets plugin_active and last_seen so the app
+     * shows "Waiting for first heartbeat" instead of "Plugin Inactive" for a stale session.
+     */
+    private void resetPluginStateForUser(String userId)
+    {
+        JsonObject body = new JsonObject();
+        body.addProperty("plugin_disconnect_requested", false);
+        body.addProperty("plugin_active", false);
+        body.add("plugin_last_seen", com.google.gson.JsonNull.INSTANCE);
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/profiles?user_id=eq." + userId)
+            .patch(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
+            .addHeader("Prefer",        "return=minimal")
+            .build();
+
+        // Synchronous — must complete before checkRemoteDisconnect() polls to avoid an
+        // immediate auto-disconnect (race: async PATCH hasn't landed when poll fires).
+        try (Response r = httpClient.newCall(request).execute()) {
+            if (!r.isSuccessful()) log("resetPluginState failed: HTTP " + r.code());
+            else                   log("resetPluginState OK");
+        } catch (IOException e) {
+            log("resetPluginState exception: " + e.getMessage());
+        }
     }
 
     private void clearStoredCredentials()
@@ -994,10 +1297,15 @@ public class SupabaseClient
 
     private void executeAsync(Request request, String label)
     {
-        executeAsync(request, label, 2);
+        executeAsync(request, label, null);
     }
 
-    private void executeAsync(Request request, String label, int retriesLeft)
+    private void executeAsync(Request request, String label, Runnable onSuccess)
+    {
+        executeAsync(request, label, onSuccess, 2);
+    }
+
+    private void executeAsync(Request request, String label, Runnable onSuccess, int retriesLeft)
     {
         httpClient.newCall(request).enqueue(new Callback()
         {
@@ -1009,7 +1317,7 @@ public class SupabaseClient
                     int attempt = 3 - retriesLeft;
                     log(label + " failed (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
                     try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    executeAsync(request, label, retriesLeft - 1);
+                    executeAsync(request, label, onSuccess, retriesLeft - 1);
                 }
                 else
                 {
@@ -1034,13 +1342,23 @@ public class SupabaseClient
                         httpClient.newCall(retried).enqueue(new Callback()
                         {
                             @Override public void onFailure(Call c, IOException e) { log(label + " retry failed: " + e.getMessage()); }
-                            @Override public void onResponse(Call c, Response r)   { log(label + (r.isSuccessful() ? " retry OK" : " retry HTTP " + r.code())); r.close(); }
+                            @Override public void onResponse(Call c, Response r)   {
+                                log(label + (r.isSuccessful() ? " retry OK" : " retry HTTP " + r.code()));
+                                if (r.isSuccessful() && onSuccess != null) onSuccess.run();
+                                r.close();
+                            }
                         });
                     }
                     return;
                 }
-                if (!response.isSuccessful()) log(label + " HTTP error: " + response.code());
-                else                          log(label + " OK");
+                if (!response.isSuccessful()) {
+                    String errorBody = "";
+                    try { if (response.body() != null) errorBody = " — " + response.body().string(); } catch (IOException ignored) {}
+                    log(label + " HTTP error: " + response.code() + errorBody);
+                } else {
+                    log(label + " OK");
+                    if (onSuccess != null) onSuccess.run();
+                }
                 response.close();
             }
         });
