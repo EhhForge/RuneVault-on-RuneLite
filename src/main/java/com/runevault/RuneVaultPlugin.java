@@ -46,6 +46,7 @@ public class RuneVaultPlugin extends Plugin
     @Inject private Gson gson;
 
     private SupabaseClient supabase;
+    private RealtimeClient realtime;
     private GETracker geTracker;
     private InventoryTracker inventoryTracker;
     private BankTracker bankTracker;
@@ -72,6 +73,7 @@ public class RuneVaultPlugin extends Plugin
             SwingUtilities.invokeLater(() -> panel.setDisconnected());
             showChatMessage("<col=ff6060>Session expired</col> \u2014 please re-link via the Rune Vault panel.");
         });
+
         geTracker = new GETracker(supabase, config, itemManager);
         inventoryTracker = new InventoryTracker(supabase, config, itemManager);
         bankTracker = new BankTracker(supabase, config, itemManager, this::showChatMessage, client);
@@ -89,6 +91,20 @@ public class RuneVaultPlugin extends Plugin
 
         // Single-thread executor — init runs first, then polling starts
         linkCodePoller = new ExecutorServiceExceptionLogger(Executors.newSingleThreadScheduledExecutor());
+
+        // Now that the executor exists, create and wire up the RealtimeClient.
+        // The disconnect callback is dispatched onto linkCodePoller so it runs
+        // on the same thread as all other SupabaseClient state mutations.
+        realtime = new RealtimeClient(
+            okHttpClient, gson, linkCodePoller,
+            () -> {
+                log.info("[RuneVault] Remote disconnect received via Realtime.");
+                SwingUtilities.invokeLater(() -> panel.setDisconnected());
+                showChatMessage("Disconnected from Rune Vault via the app.");
+                supabase.disconnect();
+            }
+        );
+        supabase.setRealtimeClient(realtime);
 
         // Run auth init off the EDT (blocking network calls not allowed on EDT)
         linkCodePoller.execute(() -> {
@@ -166,16 +182,9 @@ public class RuneVaultPlugin extends Plugin
         linkCodePoller.scheduleWithFixedDelay(
             () -> supabase.sendHeartbeat(), 120, 120, TimeUnit.SECONDS);
 
-        // Poll every 10s for a remote disconnect request from the app.
-        linkCodePoller.scheduleWithFixedDelay(() -> {
-            if (supabase.checkRemoteDisconnect())
-            {
-                log.info("[RuneVault] Remote disconnect requested by app.");
-                SwingUtilities.invokeLater(() -> panel.setDisconnected());
-                showChatMessage("Disconnected from Rune Vault via the app.");
-                supabase.disconnect();
-            }
-        }, 10, 10, TimeUnit.SECONDS);
+        // Remote disconnect is now handled by RealtimeClient (WebSocket) instead of polling.
+        // checkRemoteDisconnect() is still used by RealtimeClient's one-time REST fallback
+        // on reconnect to catch events missed while the socket was down.
     }
 
     private void checkLinkCode()
@@ -312,6 +321,14 @@ public class RuneVaultPlugin extends Plugin
     @Override
     protected void shutDown()
     {
+        // Close the Realtime WebSocket immediately — no more reconnects after shutdown.
+        // Must happen before the executor shuts down (RealtimeClient uses it for scheduling).
+        if (realtime != null)
+        {
+            realtime.close();
+            realtime = null;
+        }
+
         // Submit setPluginActive(false) to the executor before shutting it down so the HTTP
         // call runs off the EDT. shutdown() (graceful) lets the queued task complete first.
         if (supabase != null && linkCodePoller != null)

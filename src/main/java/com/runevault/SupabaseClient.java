@@ -26,6 +26,9 @@ public class SupabaseClient
     private volatile String cachedProfileId = null;
     private volatile long   cachedCashTotal = -1; // -1 = not yet known (bank not opened)
 
+    // Realtime WebSocket — replaces the 10s REST disconnect poll
+    private RealtimeClient realtimeClient = null;
+
     // Set to true only after switchProfileForUsername() completes for the current session.
     // Prevents bank/inventory syncs from firing against the wrong profile during startup.
     private volatile boolean profileReady = false;
@@ -37,6 +40,8 @@ public class SupabaseClient
     private Runnable onSessionLost = null;
 
     public void setOnSessionLost(Runnable callback) { this.onSessionLost = callback; }
+
+    public void setRealtimeClient(RealtimeClient client) { this.realtimeClient = client; }
 
     public SupabaseClient(OkHttpClient httpClient, Gson gson, RuneVaultConfig config)
     {
@@ -122,6 +127,10 @@ public class SupabaseClient
             // plugin_active = true fires later once the RS username is resolved.
             resetPluginStateForUser(userId);
 
+            // Open Realtime subscription so disconnect requests arrive instantly
+            if (realtimeClient != null)
+                realtimeClient.connect(userId, accessToken);
+
             log("RuneLite plugin linked successfully. User: " + userId);
             return true;
         }
@@ -165,9 +174,14 @@ public class SupabaseClient
         {
             cachedUserId = userId;
             log("Session restored. User: " + cachedUserId);
-            // Clear any stale disconnect flag from a previous session so the
-            // 10s checkRemoteDisconnect poll doesn't immediately self-disconnect.
+            // Clear any stale disconnect flag so an immediate Realtime event or
+            // missed-disconnect check doesn't self-disconnect right after startup.
             clearDisconnectFlagForUser(userId);
+
+            // Open Realtime subscription — replaces the 10s REST disconnect poll
+            final String tokenForRealtime = config.authToken();
+            if (realtimeClient != null)
+                realtimeClient.connect(userId, tokenForRealtime);
 
             // If we know the last-used profile from a previous session, use it immediately.
             // This allows heartbeating to the correct character before login completes,
@@ -242,6 +256,9 @@ public class SupabaseClient
             config.setAuthToken(newAccessToken);
             config.setRefreshToken(newRefreshToken);
             log("Access token refreshed successfully.");
+            // Keep the Realtime channel authenticated with the new token
+            if (realtimeClient != null)
+                realtimeClient.updateToken(newAccessToken);
             return true;
         }
         catch (IOException e)
@@ -349,6 +366,8 @@ public class SupabaseClient
                 log("disconnectByUser error: " + e.getMessage());
             }
         }
+        // Close the Realtime WebSocket — no more disconnect events needed
+        if (realtimeClient != null) realtimeClient.close();
         clearStoredCredentials();
         cachedUserId    = null;
         cachedProfileId = null;
