@@ -30,11 +30,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class RealtimeClient
 {
     private static final String WS_URL_TEMPLATE =
-        "wss://SUPABASE_PROJECT_URL_REDACTED.supabase.co/realtime/v1/websocket?apikey=%s&vsn=1.0.0";
+        RuneVaultBuildConfig.SUPABASE_URL.replace("https://", "wss://") + "/realtime/v1/websocket?apikey=%s&vsn=1.0.0";
     private static final String ANON_KEY =
-        "SUPABASE_ANON_KEY_REDACTED";
+        RuneVaultBuildConfig.SUPABASE_ANON_KEY;
     private static final String SUPABASE_URL =
-        "https://SUPABASE_PROJECT_URL_REDACTED.supabase.co";
+        RuneVaultBuildConfig.SUPABASE_URL;
 
     // Phoenix heartbeat interval — server drops the connection after ~60s without one
     private static final long PHOENIX_HEARTBEAT_INTERVAL_S = 25;

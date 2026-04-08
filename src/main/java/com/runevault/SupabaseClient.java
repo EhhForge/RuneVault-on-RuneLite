@@ -13,8 +13,8 @@ import java.io.IOException;
 @Slf4j
 public class SupabaseClient
 {
-    private static final String SUPABASE_URL = "https://SUPABASE_PROJECT_URL_REDACTED.supabase.co";
-    private static final String ANON_KEY     = "SUPABASE_ANON_KEY_REDACTED";
+    private static final String SUPABASE_URL = RuneVaultBuildConfig.SUPABASE_URL;
+    private static final String ANON_KEY     = RuneVaultBuildConfig.SUPABASE_ANON_KEY;
     private static final String EDGE_URL     = SUPABASE_URL + "/functions/v1/ge-prices";
     private static final MediaType JSON      = MediaType.get("application/json; charset=utf-8");
 
