@@ -21,9 +21,6 @@ dependencies {
     compileOnly group: 'net.runelite', name: 'client', version: runeLiteVersion
     compileOnly group: 'org.projectlombok', name: 'lombok', version: '1.18.30'
     annotationProcessor group: 'org.projectlombok', name: 'lombok', version: '1.18.30'
-    compileOnly group: 'com.squareup.okhttp3', name: 'okhttp', version: '4.9.3'
-    compileOnly group: 'com.google.code.gson', name: 'gson', version: '2.10.1'
-
     // testImplementation puts the client on the runtime classpath for the `run` task
     testImplementation group: 'net.runelite', name: 'client', version: runeLiteVersion
 
