@@ -39,9 +39,6 @@ tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'
 }
 
-test {
-    failOnNoDiscoveredTests = false
-}
 
 tasks.register('run', JavaExec) {
     classpath = sourceSets.test.runtimeClasspath
