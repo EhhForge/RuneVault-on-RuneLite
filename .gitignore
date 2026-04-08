@@ -1,4 +1,39 @@
+# Build outputs
 build/
+dist/
+*.jar
+
+# Gradle
 .gradle/
+gradle-app.setting
+!gradle-wrapper.jar
+
+# IDE
 .idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+
+# Java
 *.class
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Credentials — NEVER commit these
+local.properties
+
+# Dev scripts (local use only)
+run-dev.bat
+install.bat
+make-dist.sh
+local.properties.example

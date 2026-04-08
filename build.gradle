@@ -8,7 +8,6 @@ version = '1.0.0'
 def runeLiteVersion = 'latest.release'
 
 repositories {
-    mavenLocal()
     maven {
         url = 'https://repo.runelite.net'
         content {
