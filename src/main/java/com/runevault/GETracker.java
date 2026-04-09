@@ -74,6 +74,10 @@ public class GETracker
         {
             log.debug("[RuneVault] GE SELL: " + quantity + "x " + itemName);
             supabase.decrementItem(itemId, quantity);
+            // Credit the coins received from this sale so the portfolio value stays consistent.
+            // adjustCash is a no-op if the bank has never been opened this session (cachedCashTotal < 0).
+            long proceeds = (long) offer.getSpent();
+            if (proceeds > 0) supabase.adjustCash(proceeds);
         }
     }
 

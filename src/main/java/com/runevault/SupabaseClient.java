@@ -875,6 +875,55 @@ public class SupabaseClient
         executeAsync(request, "clearEquipmentItems");
     }
 
+    /**
+     * Deletes source="runelite" (bank scan) rows for items that are now equipped.
+     * A non-stackable item cannot be in the bank and equipped simultaneously, so the
+     * bank scan row is stale the moment the item is equipped. Removing it prevents
+     * the bank row and equipment row both contributing to the portfolio total.
+     */
+    public void removeBankRowsForEquippedItems(java.util.Set<Integer> itemIds)
+    {
+        if (!ensureAuthenticated() || !hasProfile() || itemIds.isEmpty()) return;
+        String idList = itemIds.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(","));
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items"
+                + "?user_id=eq." + getUserId()
+                + "&profile_id=eq." + cachedProfileId
+                + "&source=eq.runelite"
+                + "&game=eq.osrs"
+                + "&item_id=in.(" + idList + ")")
+            .delete()
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Prefer",        "return=minimal")
+            .build();
+        executeAsync(request, "removeBankRowsForEquippedItems(" + itemIds.size() + " items)");
+    }
+
+    /**
+     * Deletes source="runelite_equip" rows for items that are no longer equipped.
+     * The next bank scan will re-add them as source="runelite" once the player banks them,
+     * ensuring a single authoritative row per item rather than a stale equipment row.
+     */
+    public void removeEquipmentRowsForUnequippedItems(java.util.Set<Integer> itemIds)
+    {
+        if (!ensureAuthenticated() || !hasProfile() || itemIds.isEmpty()) return;
+        String idList = itemIds.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(","));
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items"
+                + "?user_id=eq." + getUserId()
+                + "&profile_id=eq." + cachedProfileId
+                + "&source=eq.runelite_equip"
+                + "&game=eq.osrs"
+                + "&item_id=in.(" + idList + ")")
+            .delete()
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Prefer",        "return=minimal")
+            .build();
+        executeAsync(request, "removeEquipmentRowsForUnequippedItems(" + itemIds.size() + " items)");
+    }
+
     public void removeItemsMissingFromBank(java.util.Set<Integer> bankItemIds)
     {
         removeItemsMissingFromBank(bankItemIds, 2);

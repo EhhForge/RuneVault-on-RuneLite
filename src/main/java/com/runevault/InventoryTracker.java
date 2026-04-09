@@ -203,6 +203,43 @@ public class InventoryTracker
 
         // Skip upload if nothing changed since last sync
         if (current.equals(lastEquipment)) return;
+
+        // Before updating lastEquipment, determine what changed so we can fix double-counting.
+        //
+        // Double-counting occurs when an item is both in a bank scan row (source="runelite")
+        // AND an equipment row (source="runelite_equip"). These are stored separately because
+        // on_conflict includes the source column. Both rows are summed in the app.
+        //
+        // Fix: when a non-stackable item is newly equipped, immediately delete its bank scan
+        // row — it can't be in the bank and equipped simultaneously. When it's unequipped,
+        // delete the equipment row so the next bank scan becomes the single source of truth.
+        //
+        // Stackable ammo (qty > 1 in the equipment slot) is intentionally skipped because
+        // the player can legitimately have some in the quiver and more in the bank.
+
+        java.util.Set<Integer> newlyEquipped    = new java.util.HashSet<>();
+        java.util.Set<Integer> newlyUnequipped  = new java.util.HashSet<>();
+
+        for (Map.Entry<Integer, Integer> entry : current.entrySet())
+        {
+            int rawId = entry.getKey();
+            int qty   = entry.getValue();
+            // qty == 1 means non-stackable (weapon, armour, etc.) — safe to remove bank row.
+            if (qty == 1 && !lastEquipment.containsKey(rawId))
+            {
+                int canonicalId = itemManager.canonicalize(rawId);
+                if (canonicalId > 0) newlyEquipped.add(canonicalId);
+            }
+        }
+        for (int rawId : lastEquipment.keySet())
+        {
+            if (!current.containsKey(rawId))
+            {
+                int canonicalId = itemManager.canonicalize(rawId);
+                if (canonicalId > 0) newlyUnequipped.add(canonicalId);
+            }
+        }
+
         lastEquipment.clear();
         lastEquipment.putAll(current);
 
@@ -239,6 +276,21 @@ public class InventoryTracker
         {
             log.debug("[RuneVault] Syncing {} equipped items", items.size());
             supabase.bulkUpsertItems(items, "runelite_equip", null);
+        }
+
+        // Remove stale bank-scan rows for newly equipped non-stackables to prevent double-counting.
+        if (!newlyEquipped.isEmpty())
+        {
+            log.debug("[RuneVault] Removing bank rows for {} newly equipped items", newlyEquipped.size());
+            supabase.removeBankRowsForEquippedItems(newlyEquipped);
+        }
+
+        // Remove stale equipment rows for unequipped items — the next bank scan will
+        // re-add them as source="runelite" when the player banks them.
+        if (!newlyUnequipped.isEmpty())
+        {
+            log.debug("[RuneVault] Removing equipment rows for {} unequipped items", newlyUnequipped.size());
+            supabase.removeEquipmentRowsForUnequippedItems(newlyUnequipped);
         }
     }
 
