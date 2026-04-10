@@ -240,13 +240,11 @@ public class InventoryTracker
             }
         }
 
-        lastEquipment.clear();
-        lastEquipment.putAll(current);
-
         if (current.isEmpty())
         {
             // Nothing equipped — clear any stale rows
             supabase.clearEquipmentItems();
+            lastEquipment.clear();
             return;
         }
 
@@ -275,7 +273,11 @@ public class InventoryTracker
         if (!items.isEmpty())
         {
             log.debug("[RuneVault] Syncing {} equipped items", items.size());
-            supabase.bulkUpsertItems(items, "runelite_equip", null);
+            final Map<Integer, Integer> captured = current;
+            supabase.bulkUpsertItems(items, "runelite_equip", () -> {
+                lastEquipment.clear();
+                lastEquipment.putAll(captured);
+            });
         }
 
         // Remove stale bank-scan rows for newly equipped non-stackables to prevent double-counting.

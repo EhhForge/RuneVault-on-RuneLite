@@ -45,7 +45,10 @@ public class SupabaseClient
 
     public SupabaseClient(OkHttpClient httpClient, Gson gson, RuneVaultConfig config)
     {
-        this.httpClient = httpClient;
+        this.httpClient = httpClient.newBuilder()
+            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .build();
         this.gson       = gson;
         this.config     = config;
     }

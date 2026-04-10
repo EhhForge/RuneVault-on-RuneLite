@@ -193,7 +193,7 @@ public class RuneVaultPlugin extends Plugin
         config.setConnectNow(false); // reset checkbox immediately — prevents re-trigger
 
         String code = config.linkCode().trim();
-        if (code.length() != 6)
+        if (!code.matches("[a-zA-Z0-9]{6}"))
         {
             config.setConnectionStatus("Error: enter a valid 6-char code");
             showChatMessage("Invalid code \u2014 enter the 6-character code from the Rune Vault app.");
@@ -256,7 +256,7 @@ public class RuneVaultPlugin extends Plugin
         if (!isConnecting.compareAndSet(false, true)) return;
 
         String code = panel.getCode();
-        if (code.length() != 6)
+        if (!code.matches("[a-zA-Z0-9]{6}"))
         {
             isConnecting.set(false);
             panel.setFeedback("Enter a valid 6-character code", true);

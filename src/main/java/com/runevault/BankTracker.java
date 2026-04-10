@@ -220,7 +220,8 @@ public class BankTracker
 
         // Increment generation so any in-flight callback from a previous scan
         // knows it is stale and should not delete rows from the new scan.
-        final int thisGeneration = ++bankScanGeneration;
+        bankScanGeneration = (bankScanGeneration + 1) % 100_000;
+        final int thisGeneration = bankScanGeneration;
 
         log.debug("[RuneVault] Syncing {} bank items ({} placeholders skipped) gen={}",
             result.items.size(), result.placeholderCount, thisGeneration);
