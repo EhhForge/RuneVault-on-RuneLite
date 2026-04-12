@@ -235,8 +235,16 @@ public class BankTracker
         // fire before inserts complete and cause items to temporarily vanish in the app.
         // Guard with the generation counter: if a newer scan has already started by the
         // time this callback fires, skip the delete to avoid wiping the new scan's rows.
-        Runnable afterUpsert = config.bankRemoveMissing()
-            ? () -> {
+        // The chat message is also sent from the callback so it only appears after the
+        // upsert succeeds — not before.
+        int synced = result.items.size() + (bankCoins > 0 ? 1 : 0);
+        String skipped = result.placeholderCount > 0 ? " (" + result.placeholderCount + " placeholders skipped)" : "";
+        Runnable notifyUser = () -> chatMessage.accept("<col=00c060>Bank synced:</col> " + synced + " slot(s)." + skipped);
+
+        Runnable afterUpsert;
+        if (config.bankRemoveMissing())
+        {
+            afterUpsert = () -> {
                 if (bankScanGeneration != thisGeneration)
                 {
                     log.debug("[RuneVault] Skipping stale removeItemsMissingFromBank (gen {} superseded by gen {})",
@@ -244,8 +252,13 @@ public class BankTracker
                     return;
                 }
                 supabase.removeItemsMissingFromBank(bankItemIds);
-              }
-            : null;
+                notifyUser.run();
+            };
+        }
+        else
+        {
+            afterUpsert = notifyUser;
+        }
         supabase.bulkUpsertItems(result.items, "runelite", afterUpsert);
 
         if (config.syncCash())
@@ -253,10 +266,6 @@ public class BankTracker
             long totalCoins = (long) bankCoins + cachedInventoryCoins;
             if (totalCoins > 0) supabase.updateCash(totalCoins);
         }
-
-        int synced = result.items.size() + (bankCoins > 0 ? 1 : 0);
-        String skipped = result.placeholderCount > 0 ? " (" + result.placeholderCount + " placeholders skipped)" : "";
-        chatMessage.accept("<col=00c060>Bank synced:</col> " + synced + " slot(s)." + skipped);
     }
 
     /**

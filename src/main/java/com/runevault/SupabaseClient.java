@@ -9,6 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
 
 import java.io.IOException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 @Slf4j
 public class SupabaseClient
@@ -21,6 +23,12 @@ public class SupabaseClient
     private final OkHttpClient httpClient;
     private final Gson gson;
     private final RuneVaultConfig config;
+    private final ScheduledExecutorService retryScheduler =
+        Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "runevault-retry");
+            t.setDaemon(true);
+            return t;
+        });
 
     private volatile String cachedUserId    = null;
     private volatile String cachedProfileId = null;
@@ -612,8 +620,7 @@ public class SupabaseClient
                 {
                     int attempt = 3 - retriesLeft;
                     log("upsertItem fetch error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
-                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    upsertItem(item, retriesLeft - 1);
+                    retryScheduler.schedule(() -> upsertItem(item, retriesLeft - 1), attempt, java.util.concurrent.TimeUnit.SECONDS);
                 }
                 else
                 {
@@ -717,8 +724,7 @@ public class SupabaseClient
                 {
                     int attempt = 3 - retriesLeft;
                     log("decrementItem fetch error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
-                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    decrementItem(itemId, quantityToRemove, retriesLeft - 1);
+                    retryScheduler.schedule(() -> decrementItem(itemId, quantityToRemove, retriesLeft - 1), attempt, java.util.concurrent.TimeUnit.SECONDS);
                 }
                 else
                 {
@@ -957,8 +963,7 @@ public class SupabaseClient
                 {
                     int attempt = 3 - retriesLeft;
                     log("removeItemsMissingFromBank error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
-                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    removeItemsMissingFromBank(bankItemIds, retriesLeft - 1);
+                    retryScheduler.schedule(() -> removeItemsMissingFromBank(bankItemIds, retriesLeft - 1), attempt, java.util.concurrent.TimeUnit.SECONDS);
                 }
                 else
                 {
@@ -1387,8 +1392,7 @@ public class SupabaseClient
                 {
                     int attempt = 3 - retriesLeft;
                     log(label + " failed (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
-                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    executeAsync(request, label, onSuccess, retriesLeft - 1);
+                    retryScheduler.schedule(() -> executeAsync(request, label, onSuccess, retriesLeft - 1), attempt, java.util.concurrent.TimeUnit.SECONDS);
                 }
                 else
                 {
