@@ -650,8 +650,30 @@ public class SupabaseClient
     public void updateCash(long amount)
     {
         cachedCashTotal = amount;
-        PortfolioItem coins = new PortfolioItem(995, "Coins", (int) amount, 1, null, 0);
-        doUpsertItem(coins, (int) amount, 1);
+        if (!ensureAuthenticated() || !hasProfile()) return;
+
+        JsonObject body = new JsonObject();
+        body.addProperty("id",         java.util.UUID.randomUUID().toString());
+        body.addProperty("user_id",    getUserId());
+        body.addProperty("profile_id", cachedProfileId);
+        body.addProperty("item_id",    995);
+        body.addProperty("item_name",  "Coins");
+        body.addProperty("game",       "osrs");
+        body.addProperty("quantity",   amount);
+        body.addProperty("buy_price",  1);
+        body.addProperty("source",     "runelite");
+        body.addProperty("watchlisted", false);
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,profile_id,item_id,game")
+            .post(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
+            .addHeader("Prefer",        "resolution=merge-duplicates,return=minimal")
+            .build();
+
+        executeAsync(request, "updateCash(" + amount + ")");
     }
 
     /**
