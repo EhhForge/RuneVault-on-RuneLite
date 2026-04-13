@@ -1,6 +1,7 @@
 package com.runevault;
 
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Client;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
@@ -16,11 +17,14 @@ import java.util.Map;
 @Slf4j
 public class InventoryTracker
 {
-    private static final int COINS_ID = 995;
+    private static final int COINS_ID             = 995;
+    private static final int BANK_WIDGET_GROUP_ID = 12;  // bank interface
+    private static final int GE_WIDGET_GROUP_ID   = 465; // Grand Exchange interface
 
     private final SupabaseClient supabase;
     private final RuneVaultConfig config;
     private final ItemManager itemManager;
+    private final Client client;
 
     // Snapshot of the last known inventory: itemId → quantity
     private final Map<Integer, Integer> lastInventory = new HashMap<>();
@@ -32,18 +36,21 @@ public class InventoryTracker
     private boolean pendingPickup = false;
     private int pendingPickupItemId = -1;
 
-    // Track if the next inventory change was caused by a drop action
+    // Track if the next inventory change was caused by a drop action.
+    // A Set handles rapid shift+click drops where multiple MenuOptionClicked events
+    // fire before a single ItemContainerChanged, overwriting a single int would lose items.
     private boolean pendingDrop = false;
-    private int pendingDropItemId = -1;
+    private final java.util.Set<Integer> pendingDropItemIds = new java.util.HashSet<>();
 
     // Last known equipment snapshot — used to avoid redundant re-uploads
     private final Map<Integer, Integer> lastEquipment = new HashMap<>();
 
-    public InventoryTracker(SupabaseClient supabase, RuneVaultConfig config, ItemManager itemManager)
+    public InventoryTracker(SupabaseClient supabase, RuneVaultConfig config, ItemManager itemManager, Client client)
     {
         this.supabase = supabase;
         this.config = config;
         this.itemManager = itemManager;
+        this.client = client;
     }
 
     /**
@@ -57,7 +64,7 @@ public class InventoryTracker
         if ("Drop".equalsIgnoreCase(event.getMenuOption()))
         {
             pendingDrop = true;
-            pendingDropItemId = event.getItemId();
+            pendingDropItemIds.add(event.getItemId());
         }
 
         if ("Take".equalsIgnoreCase(event.getMenuOption()))
@@ -126,44 +133,60 @@ public class InventoryTracker
         lastInventory.clear();
         lastInventory.putAll(currentInventory);
 
-        // Reset action flags
+        // Reset pickup flag (single-action, always clears after one IC).
+        // Drop flags are cleared per-item in handleItemRemoved so rapid shift+click
+        // drops across multiple IC events are all handled before the Set is emptied.
         pendingPickup = false;
         pendingPickupItemId = -1;
-        pendingDrop = false;
-        pendingDropItemId = -1;
     }
 
     private void handleItemAdded(int itemId, int quantity)
     {
         if (!supabase.isProfileReady()) return;
-        // Cash: only track explicit ground pickups (pendingPickup flag set by "Take" click).
+
+        // Cash: only track explicit ground pickups.
         // All other coin increases (GE collection, bank withdrawal, etc.) are handled by BankTracker.
         if (itemId == COINS_ID)
         {
-            // Ground pickups: pendingPickup is set by "Take" click.
-            // getItemId() returns -1 for ground items so we don't check the ID here.
             if (config.syncCash() && pendingPickup)
                 supabase.adjustCash(quantity);
             return;
         }
 
-        if (!config.trackPickups()) return;
+        // Item just unequipped → inventory appearance is not a "new" item.
+        // lastEquipment still holds the pre-event snapshot here because the async
+        // bulkUpsertItems callback (which clears it) has not yet fired.
+        if (lastEquipment.containsKey(itemId)) return;
 
-        // Only count genuine ground pickups (preceded by a "Take" click).
-        // This prevents GE collections, bank withdrawals, etc. from being double-counted.
-        // pendingPickupItemId is -1 for ground items (loot piles) — skip ID check in that case.
-        if (!pendingPickup) return;
-        if (pendingPickupItemId != -1 && pendingPickupItemId != itemId) return;
+        if (pendingPickup)
+        {
+            // Ground pickup (preceded by a right-click "Take")
+            if (!config.trackPickups()) return;
+            // pendingPickupItemId is -1 for ground items (loot piles) — skip ID check in that case.
+            if (pendingPickupItemId != -1 && pendingPickupItemId != itemId) return;
+
+            int canonicalId = itemManager.canonicalize(itemId);
+            if (canonicalId <= 0) return;
+            String itemName = itemManager.getItemComposition(canonicalId).getName();
+            String imageUrl = buildImageUrl(canonicalId);
+            log.debug("[RuneVault] Picked up: " + quantity + "x " + itemName);
+            supabase.upsertItem(new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl, 0));
+            return;
+        }
+
+        // Skill gain: no pending action, not an unequip, no bank/GE widget open.
+        // Bank widget open  → withdrawal, not a gain.
+        // GE widget open    → collection, not a gain.
+        if (!config.trackSkillGains()) return;
+        if (client.getWidget(BANK_WIDGET_GROUP_ID, 0) != null) return;
+        if (client.getWidget(GE_WIDGET_GROUP_ID, 0)   != null) return;
 
         int canonicalId = itemManager.canonicalize(itemId);
         if (canonicalId <= 0) return;
         String itemName = itemManager.getItemComposition(canonicalId).getName();
         String imageUrl = buildImageUrl(canonicalId);
-        log.debug("[RuneVault] Picked up: " + quantity + "x " + itemName);
-
-        // Buy price unknown for pickups — set to 0
-        PortfolioItem item = new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl, 0);
-        supabase.upsertItem(item);
+        log.debug("[RuneVault] Skill gain: " + quantity + "x " + itemName);
+        supabase.upsertItem(new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl, 0));
     }
 
     private void handleItemRemoved(int itemId, int quantity)
@@ -172,16 +195,22 @@ public class InventoryTracker
         // Cash: only track explicit drops. Bank deposits / spending are handled by BankTracker.
         if (itemId == COINS_ID)
         {
-            if (config.syncCash() && pendingDrop && pendingDropItemId == COINS_ID)
+            if (config.syncCash() && pendingDrop && pendingDropItemIds.remove(COINS_ID))
+            {
+                if (pendingDropItemIds.isEmpty()) pendingDrop = false;
                 supabase.adjustCash(-quantity);
+            }
             return;
         }
 
         if (!config.trackDropsAndSales()) return;
 
         // Only act on explicit drops (not inventory rearrangement, equipping, etc.)
-        if (pendingDrop && pendingDropItemId == itemId)
+        // Remove per-item from the Set — global clear in onItemContainerChanged would wipe
+        // remaining entries before subsequent IC events fire (one IC per shift+click drop).
+        if (pendingDrop && pendingDropItemIds.remove(itemId))
         {
+            if (pendingDropItemIds.isEmpty()) pendingDrop = false;
             int canonicalId = itemManager.canonicalize(itemId);
             String itemName = itemManager.getItemComposition(canonicalId).getName();
             log.debug("[RuneVault] Dropped: " + quantity + "x " + itemName);
@@ -274,21 +303,26 @@ public class InventoryTracker
         {
             log.debug("[RuneVault] Syncing {} equipped items", items.size());
             final Map<Integer, Integer> captured = current;
+            final java.util.Set<Integer> equippedToRemove = new java.util.HashSet<>(newlyEquipped);
             supabase.bulkUpsertItems(items, "runelite_equip", () -> {
                 lastEquipment.clear();
                 lastEquipment.putAll(captured);
+                // Remove bank rows AFTER equip rows are confirmed written — prevents a window
+                // where the item is momentarily absent from the DB (deleted bank row, upsert not yet landed)
+                // which would cause the app to show a deflated portfolio value.
+                if (!equippedToRemove.isEmpty())
+                {
+                    log.debug("[RuneVault] Removing bank rows for {} newly equipped items (post-upsert)", equippedToRemove.size());
+                    supabase.removeBankRowsForEquippedItems(equippedToRemove);
+                }
             });
-        }
-
-        // Remove stale bank-scan rows for newly equipped non-stackables to prevent double-counting.
-        if (!newlyEquipped.isEmpty())
-        {
-            log.debug("[RuneVault] Removing bank rows for {} newly equipped items", newlyEquipped.size());
-            supabase.removeBankRowsForEquippedItems(newlyEquipped);
         }
 
         // Remove stale equipment rows for unequipped items — the next bank scan will
         // re-add them as source="runelite" when the player banks them.
+        // This is safe to fire immediately since we're removing the equip row, not a bank row —
+        // there's no window where the item disappears: the bank scan that restores it fires on
+        // the next bank open, which is expected user behaviour.
         if (!newlyUnequipped.isEmpty())
         {
             log.debug("[RuneVault] Removing equipment rows for {} unequipped items", newlyUnequipped.size());
@@ -307,7 +341,7 @@ public class InventoryTracker
         pendingPickup = false;
         pendingPickupItemId = -1;
         pendingDrop = false;
-        pendingDropItemId = -1;
+        pendingDropItemIds.clear();
     }
 
     private Map<Integer, Integer> buildMap(ItemContainer container)

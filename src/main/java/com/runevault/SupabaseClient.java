@@ -605,6 +605,7 @@ public class SupabaseClient
                 + "&profile_id=eq." + cachedProfileId
                 + "&item_id=eq." + item.getItemId()
                 + "&game=eq.osrs"
+                + "&source=eq.purchase"
                 + "&select=id,quantity,buy_price")
             .get()
             .addHeader("apikey", ANON_KEY)
