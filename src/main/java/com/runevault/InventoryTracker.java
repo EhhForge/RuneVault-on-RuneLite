@@ -42,6 +42,11 @@ public class InventoryTracker
     private boolean pendingDrop = false;
     private final java.util.Map<Integer, Integer> pendingDropCounts = new java.util.HashMap<>();
 
+    // Items obtained via skill gains / pickups that are in inventory but not yet banked.
+    // Used to avoid falsely decrementing portfolio_items when these are dropped before banking,
+    // since skill gains no longer write to portfolio_items (they go to activity_feed only).
+    private final Map<Integer, Integer> skillGainInventory = new HashMap<>();
+
     // Last known equipment snapshot — used to avoid redundant re-uploads
     private final Map<Integer, Integer> lastEquipment = new HashMap<>();
 
@@ -51,6 +56,15 @@ public class InventoryTracker
         this.config = config;
         this.itemManager = itemManager;
         this.client = client;
+    }
+
+    /**
+     * Called when the bank widget opens. Clears the skill-gain inventory tracker
+     * because the upcoming bank scan will become authoritative for all quantities.
+     */
+    public void onBankOpened()
+    {
+        skillGainInventory.clear();
     }
 
     /**
@@ -171,6 +185,7 @@ public class InventoryTracker
             String imageUrl = buildImageUrl(canonicalId);
             log.debug("[RuneVault] Picked up: " + quantity + "x " + itemName);
             supabase.logActivity(new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl, 0), "pickup");
+            skillGainInventory.merge(canonicalId, quantity, Integer::sum);
             return;
         }
 
@@ -187,6 +202,7 @@ public class InventoryTracker
         String imageUrl = buildImageUrl(canonicalId);
         log.debug("[RuneVault] Skill gain: " + quantity + "x " + itemName);
         supabase.logActivity(new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl, 0), "skill_gain");
+        skillGainInventory.merge(canonicalId, quantity, Integer::sum);
     }
 
     private void handleItemRemoved(int itemId, int quantity)
@@ -222,10 +238,31 @@ public class InventoryTracker
             if (remaining <= 0) pendingDropCounts.remove(itemId);
             else pendingDropCounts.put(itemId, remaining);
             if (pendingDropCounts.isEmpty()) pendingDrop = false;
+
             int canonicalId = itemManager.canonicalize(itemId);
             String itemName = itemManager.getItemComposition(canonicalId).getName();
-            log.debug("[RuneVault] Dropped: " + quantity + "x " + itemName);
-            supabase.decrementItem(canonicalId, quantity);
+
+            // Attribute drop to skill-gain/pickup inventory first.
+            // Those items were never written to portfolio_items, so decrementing them
+            // would incorrectly reduce the bank count (e.g. dropping freshly chopped logs).
+            int fromSkillGain = Math.min(skillGainInventory.getOrDefault(canonicalId, 0), quantity);
+            if (fromSkillGain > 0)
+            {
+                int newSkillQty = skillGainInventory.get(canonicalId) - fromSkillGain;
+                if (newSkillQty <= 0) skillGainInventory.remove(canonicalId);
+                else skillGainInventory.put(canonicalId, newSkillQty);
+            }
+            int bankQty = quantity - fromSkillGain;
+            if (bankQty > 0)
+            {
+                log.debug("[RuneVault] Dropped: " + quantity + "x " + itemName
+                    + " (" + fromSkillGain + " from skilling, " + bankQty + " from bank)");
+                supabase.decrementItem(canonicalId, bankQty);
+            }
+            else
+            {
+                log.debug("[RuneVault] Dropped: " + quantity + "x " + itemName + " (all from skilling — no bank decrement)");
+            }
         }
         // Note: GE sales are handled by GETracker, not here
     }

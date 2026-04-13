@@ -462,6 +462,8 @@ public class RuneVaultPlugin extends Plugin
     {
         if (!supabase.isAuthenticated()) return;
         bankTracker.onWidgetLoaded(event);
+        if (event.getGroupId() == BankTracker.BANK_WIDGET_GROUP_ID)
+            inventoryTracker.onBankOpened();
     }
 
     // -------------------------------------------------------------------------
