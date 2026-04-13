@@ -894,6 +894,7 @@ public class SupabaseClient
                 + "&profile_id=eq." + cachedProfileId
                 + "&source=eq.runelite"
                 + "&game=eq.osrs"
+                + "&item_id=neq.995"   // exclude coins — they are never in bankItemIds but should never be deleted
                 + "&select=id,item_id")
             .get()
             .addHeader("apikey",        ANON_KEY)
