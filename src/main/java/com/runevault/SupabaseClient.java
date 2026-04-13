@@ -599,14 +599,14 @@ public class SupabaseClient
         if (!ensureAuthenticated()) return;
         if (!hasProfile()) { log("upsertItem skipped — no profile loaded yet"); return; }
 
+        // Fetch the single row for this item (no source filter — single-row architecture).
         Request fetchRequest = new Request.Builder()
             .url(SUPABASE_URL + "/rest/v1/portfolio_items"
                 + "?user_id=eq." + getUserId()
                 + "&profile_id=eq." + cachedProfileId
                 + "&item_id=eq." + item.getItemId()
                 + "&game=eq.osrs"
-                + "&source=eq.purchase"
-                + "&select=id,quantity,buy_price")
+                + "&select=id,quantity,buy_price,source")
             .get()
             .addHeader("apikey", ANON_KEY)
             .addHeader("Authorization", "Bearer " + config.authToken())
@@ -642,22 +642,59 @@ public class SupabaseClient
                     JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
                     if (rows.size() == 0)
                     {
+                        // No existing row — insert fresh purchase row.
                         doUpsertItem(item, item.getQuantity(), item.getBuyPrice());
                     }
                     else
                     {
-                        JsonObject row      = rows.get(0).getAsJsonObject();
-                        long existingQty    = row.get("quantity").getAsLong();
-                        long existingPrice  = row.get("buy_price").getAsLong();
-                        long newQty         = existingQty + item.getQuantity();
-                        long avgPrice       = ((long) existingQty * existingPrice + (long) item.getQuantity() * item.getBuyPrice()) / newQty;
-                        doUpsertItem(item, newQty, avgPrice);
+                        JsonObject row   = rows.get(0).getAsJsonObject();
+                        String rowSource = row.has("source") && !row.get("source").isJsonNull()
+                            ? row.get("source").getAsString() : "";
+
+                        if ("runelite".equals(rowSource) || "runelite_equip".equals(rowSource))
+                        {
+                            // Bank-authoritative row exists. Don't touch quantity — bank scan
+                            // is the source of truth. Only update last_added_at so the item
+                            // appears in the "Latest Added" section.
+                            String rowId = row.get("id").getAsString();
+                            touchLastAddedAt(rowId, item.getItemName());
+                        }
+                        else
+                        {
+                            // Purchase/drop row — accumulate quantity with weighted avg price.
+                            long existingQty   = row.get("quantity").getAsLong();
+                            long existingPrice = row.get("buy_price").getAsLong();
+                            long newQty        = existingQty + item.getQuantity();
+                            long avgPrice      = ((long) existingQty * existingPrice + (long) item.getQuantity() * item.getBuyPrice()) / newQty;
+                            doUpsertItem(item, newQty, avgPrice);
+                        }
                     }
                 } finally {
                     response.close();
                 }
             }
         });
+    }
+
+    /**
+     * Updates only last_added_at on an existing row (e.g. skill gain when a bank-scan
+     * row already owns the item). Keeps quantity and source intact.
+     */
+    private void touchLastAddedAt(String rowId, String itemName)
+    {
+        JsonObject body = new JsonObject();
+        body.addProperty("last_added_at", System.currentTimeMillis());
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items?id=eq." + rowId)
+            .patch(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",         ANON_KEY)
+            .addHeader("Authorization",  "Bearer " + config.authToken())
+            .addHeader("Content-Type",   "application/json")
+            .addHeader("Prefer",         "return=minimal")
+            .build();
+
+        executeAsync(request, "touchLastAddedAt(" + itemName + ")");
     }
 
     private void doUpsertItem(PortfolioItem item, long quantity, long buyPrice)
@@ -681,7 +718,7 @@ public class SupabaseClient
         if (item.getImageUrl() != null) body.addProperty("image_url", item.getImageUrl());
 
         Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,profile_id,item_id,game,source")
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,profile_id,item_id,game")
             .post(RequestBody.create(JSON, gson.toJson(body)))
             .addHeader("apikey",         ANON_KEY)
             .addHeader("Authorization",  "Bearer " + config.authToken())
@@ -842,19 +879,13 @@ public class SupabaseClient
             body.add(obj);
         }
 
-        // Equipment snapshots always overwrite (quantity and price may change on re-equip).
-        // Bank scans respect the bankOverwriteDuplicates config.
-        String prefer;
-        if ("runelite_equip".equals(source)) {
-            prefer = "resolution=merge-duplicates,return=minimal";
-        } else {
-            prefer = config.bankOverwriteDuplicates()
-                ? "resolution=merge-duplicates,return=minimal"
-                : "resolution=ignore-duplicates,return=minimal";
-        }
+        // Single-row architecture: always overwrite. The unique key is now 4-column
+        // (user_id, profile_id, item_id, game), so every upsert hits the same row.
+        // Bank scans set the authoritative quantity; equipment snapshots update source+price.
+        String prefer = "resolution=merge-duplicates,return=minimal";
 
         Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,profile_id,item_id,game,source")
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,profile_id,item_id,game")
             .post(RequestBody.create(JSON, gson.toJson(body)))
             .addHeader("apikey",        ANON_KEY)
             .addHeader("Authorization", "Bearer " + config.authToken())
@@ -885,30 +916,6 @@ public class SupabaseClient
         executeAsync(request, "clearEquipmentItems");
     }
 
-    /**
-     * Deletes source="runelite" (bank scan) rows for items that are now equipped.
-     * A non-stackable item cannot be in the bank and equipped simultaneously, so the
-     * bank scan row is stale the moment the item is equipped. Removing it prevents
-     * the bank row and equipment row both contributing to the portfolio total.
-     */
-    public void removeBankRowsForEquippedItems(java.util.Set<Integer> itemIds)
-    {
-        if (!ensureAuthenticated() || !hasProfile() || itemIds.isEmpty()) return;
-        String idList = itemIds.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(","));
-        Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items"
-                + "?user_id=eq." + getUserId()
-                + "&profile_id=eq." + cachedProfileId
-                + "&source=eq.runelite"
-                + "&game=eq.osrs"
-                + "&item_id=in.(" + idList + ")")
-            .delete()
-            .addHeader("apikey",        ANON_KEY)
-            .addHeader("Authorization", "Bearer " + config.authToken())
-            .addHeader("Prefer",        "return=minimal")
-            .build();
-        executeAsync(request, "removeBankRowsForEquippedItems(" + itemIds.size() + " items)");
-    }
 
     /**
      * Deletes source="runelite_equip" rows for items that are no longer equipped.

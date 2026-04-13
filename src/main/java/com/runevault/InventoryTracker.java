@@ -233,33 +233,13 @@ public class InventoryTracker
         // Skip upload if nothing changed since last sync
         if (current.equals(lastEquipment)) return;
 
-        // Before updating lastEquipment, determine what changed so we can fix double-counting.
-        //
-        // Double-counting occurs when an item is both in a bank scan row (source="runelite")
-        // AND an equipment row (source="runelite_equip"). These are stored separately because
-        // on_conflict includes the source column. Both rows are summed in the app.
-        //
-        // Fix: when a non-stackable item is newly equipped, immediately delete its bank scan
-        // row — it can't be in the bank and equipped simultaneously. When it's unequipped,
-        // delete the equipment row so the next bank scan becomes the single source of truth.
-        //
-        // Stackable ammo (qty > 1 in the equipment slot) is intentionally skipped because
-        // the player can legitimately have some in the quiver and more in the bank.
+        // Determine what was newly unequipped so we can remove stale equipment rows.
+        // In the single-row architecture, equipping naturally overwrites the row's source
+        // to "runelite_equip" via the upsert — no separate bank-row deletion is needed.
+        // Unequipping: delete the equipment row; the next bank scan restores it as "runelite".
 
-        java.util.Set<Integer> newlyEquipped    = new java.util.HashSet<>();
-        java.util.Set<Integer> newlyUnequipped  = new java.util.HashSet<>();
+        java.util.Set<Integer> newlyUnequipped = new java.util.HashSet<>();
 
-        for (Map.Entry<Integer, Integer> entry : current.entrySet())
-        {
-            int rawId = entry.getKey();
-            int qty   = entry.getValue();
-            // qty == 1 means non-stackable (weapon, armour, etc.) — safe to remove bank row.
-            if (qty == 1 && !lastEquipment.containsKey(rawId))
-            {
-                int canonicalId = itemManager.canonicalize(rawId);
-                if (canonicalId > 0) newlyEquipped.add(canonicalId);
-            }
-        }
         for (int rawId : lastEquipment.keySet())
         {
             if (!current.containsKey(rawId))
@@ -303,18 +283,9 @@ public class InventoryTracker
         {
             log.debug("[RuneVault] Syncing {} equipped items", items.size());
             final Map<Integer, Integer> captured = current;
-            final java.util.Set<Integer> equippedToRemove = new java.util.HashSet<>(newlyEquipped);
             supabase.bulkUpsertItems(items, "runelite_equip", () -> {
                 lastEquipment.clear();
                 lastEquipment.putAll(captured);
-                // Remove bank rows AFTER equip rows are confirmed written — prevents a window
-                // where the item is momentarily absent from the DB (deleted bank row, upsert not yet landed)
-                // which would cause the app to show a deflated portfolio value.
-                if (!equippedToRemove.isEmpty())
-                {
-                    log.debug("[RuneVault] Removing bank rows for {} newly equipped items (post-upsert)", equippedToRemove.size());
-                    supabase.removeBankRowsForEquippedItems(equippedToRemove);
-                }
             });
         }
 

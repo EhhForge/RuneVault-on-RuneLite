@@ -75,7 +75,7 @@ public class RuneVaultPlugin extends Plugin
         });
 
         geTracker = new GETracker(supabase, config, itemManager);
-        inventoryTracker = new InventoryTracker(supabase, config, itemManager);
+        inventoryTracker = new InventoryTracker(supabase, config, itemManager, client);
         bankTracker = new BankTracker(supabase, config, itemManager, this::showChatMessage, client);
 
         // Build the side panel

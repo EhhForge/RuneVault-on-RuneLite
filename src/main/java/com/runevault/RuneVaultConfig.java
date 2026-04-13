@@ -103,11 +103,26 @@ public interface RuneVaultConfig extends Config
     void setTrackPickups(boolean value);
 
     @ConfigItem(
+        keyName = "trackSkillGains",
+        name = "Track Skill Gains",
+        description = "Add items gained from skilling (woodcutting, mining, fishing, etc.) to your portfolio",
+        section = syncSection,
+        position = 2
+    )
+    default boolean trackSkillGains()
+    {
+        return true;
+    }
+
+    @ConfigItem(keyName = "trackSkillGains", name = "", description = "")
+    void setTrackSkillGains(boolean value);
+
+    @ConfigItem(
         keyName = "trackDropsAndSales",
         name = "Track Drops & Sales",
         description = "Remove items dropped or sold from your portfolio",
         section = syncSection,
-        position = 2
+        position = 3
     )
     default boolean trackDropsAndSales()
     {
@@ -122,7 +137,7 @@ public interface RuneVaultConfig extends Config
         name = "Sync Cash Stack",
         description = "Keep your coin stack updated in Rune Vault",
         section = syncSection,
-        position = 3
+        position = 4
     )
     default boolean syncCash()
     {
