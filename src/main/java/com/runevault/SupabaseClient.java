@@ -587,15 +587,105 @@ public class SupabaseClient
     // -------------------------------------------------------------------------
 
     /**
-     * Atomically increments an item's quantity for skill gains and ground pickups.
-     * Uses an RPC so concurrent rapid gains don't race — no client-side read needed.
-     * If a bank-authoritative row (source=runelite/runelite_equip) already exists,
-     * the RPC only updates last_added_at (bank scan quantity is the source of truth).
+     * Upsert a GE-purchased item into portfolio_items (weighted average cost).
+     * Only used by GETracker. Skill gains and pickups use logActivity() instead.
      */
     public void upsertItem(PortfolioItem item)
     {
+        upsertItem(item, 2);
+    }
+
+    private void upsertItem(PortfolioItem item, int retriesLeft)
+    {
         if (!ensureAuthenticated()) return;
         if (!hasProfile()) { log("upsertItem skipped — no profile loaded yet"); return; }
+
+        Request fetchRequest = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items"
+                + "?user_id=eq." + getUserId()
+                + "&profile_id=eq." + cachedProfileId
+                + "&item_id=eq." + item.getItemId()
+                + "&game=eq.osrs"
+                + "&select=id,quantity,buy_price")
+            .get()
+            .addHeader("apikey", ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .build();
+
+        httpClient.newCall(fetchRequest).enqueue(new Callback()
+        {
+            @Override
+            public void onFailure(Call call, IOException e)
+            {
+                if (retriesLeft > 0)
+                {
+                    int attempt = 3 - retriesLeft;
+                    log("upsertItem fetch error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
+                    retryScheduler.schedule(() -> upsertItem(item, retriesLeft - 1), attempt, java.util.concurrent.TimeUnit.SECONDS);
+                }
+                else log("upsertItem fetch failed after retries: " + e.getMessage());
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException
+            {
+                try {
+                    long qty = item.getQuantity(), price = item.getBuyPrice();
+                    if (response.isSuccessful() && response.body() != null)
+                    {
+                        JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
+                        if (rows.size() > 0)
+                        {
+                            JsonObject row    = rows.get(0).getAsJsonObject();
+                            long existingQty  = row.get("quantity").getAsLong();
+                            long existingPrice = row.get("buy_price").getAsLong();
+                            long newQty        = existingQty + item.getQuantity();
+                            price = ((long) existingQty * existingPrice + (long) item.getQuantity() * item.getBuyPrice()) / newQty;
+                            qty   = newQty;
+                        }
+                    }
+                    doUpsertItem(item, qty, price);
+                } finally { response.close(); }
+            }
+        });
+    }
+
+    private void doUpsertItem(PortfolioItem item, long quantity, long buyPrice)
+    {
+        JsonObject body = new JsonObject();
+        body.addProperty("id",            java.util.UUID.randomUUID().toString());
+        body.addProperty("user_id",       getUserId());
+        body.addProperty("profile_id",    cachedProfileId);
+        body.addProperty("item_id",       item.getItemId());
+        body.addProperty("item_name",     item.getItemName());
+        body.addProperty("game",          "osrs");
+        body.addProperty("quantity",      quantity);
+        body.addProperty("buy_price",     buyPrice);
+        body.addProperty("last_added_at", System.currentTimeMillis());
+        body.addProperty("watchlisted",   false);
+        body.addProperty("source",        "purchase");
+        if (item.getImageUrl() != null) body.addProperty("image_url", item.getImageUrl());
+
+        Request request = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,profile_id,item_id,game")
+            .post(RequestBody.create(JSON, gson.toJson(body)))
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
+            .addHeader("Prefer",        "resolution=merge-duplicates,return=minimal")
+            .build();
+        executeAsync(request, "upsertItem(" + item.getItemName() + ")");
+    }
+
+    /**
+     * Logs a skill gain or ground pickup to the activity_feed table.
+     * Does NOT touch portfolio_items — bank scan is the sole owner of portfolio quantities.
+     * activitySource: "skill_gain" | "pickup"
+     */
+    public void logActivity(PortfolioItem item, String activitySource)
+    {
+        if (!ensureAuthenticated()) return;
+        if (!hasProfile()) { log("logActivity skipped — no profile loaded yet"); return; }
 
         JsonObject body = new JsonObject();
         body.addProperty("p_user_id",    getUserId());
@@ -603,21 +693,22 @@ public class SupabaseClient
         body.addProperty("p_item_id",    item.getItemId());
         body.addProperty("p_game",       "osrs");
         body.addProperty("p_item_name",  item.getItemName());
-        body.addProperty("p_delta",      (long) item.getQuantity());
+        body.addProperty("p_quantity",   item.getQuantity());
+        body.addProperty("p_source",     activitySource);
         if (item.getImageUrl() != null)
             body.addProperty("p_image_url", item.getImageUrl());
         else
             body.add("p_image_url", com.google.gson.JsonNull.INSTANCE);
 
         Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/rpc/increment_portfolio_item")
+            .url(SUPABASE_URL + "/rest/v1/rpc/insert_activity_item")
             .post(RequestBody.create(JSON, gson.toJson(body)))
             .addHeader("apikey",        ANON_KEY)
             .addHeader("Authorization", "Bearer " + config.authToken())
             .addHeader("Content-Type",  "application/json")
             .build();
 
-        executeAsync(request, "upsertItem(" + item.getItemName() + ")");
+        executeAsync(request, "logActivity(" + item.getItemName() + " [" + activitySource + "])");
     }
 
     /**

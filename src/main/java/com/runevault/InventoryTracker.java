@@ -170,7 +170,7 @@ public class InventoryTracker
             String itemName = itemManager.getItemComposition(canonicalId).getName();
             String imageUrl = buildImageUrl(canonicalId);
             log.debug("[RuneVault] Picked up: " + quantity + "x " + itemName);
-            supabase.upsertItem(new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl, 0));
+            supabase.logActivity(new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl, 0), "pickup");
             return;
         }
 
@@ -186,7 +186,7 @@ public class InventoryTracker
         String itemName = itemManager.getItemComposition(canonicalId).getName();
         String imageUrl = buildImageUrl(canonicalId);
         log.debug("[RuneVault] Skill gain: " + quantity + "x " + itemName);
-        supabase.upsertItem(new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl, 0));
+        supabase.logActivity(new PortfolioItem(canonicalId, itemName, quantity, 0, imageUrl, 0), "skill_gain");
     }
 
     private void handleItemRemoved(int itemId, int quantity)
