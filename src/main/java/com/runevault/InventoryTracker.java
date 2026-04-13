@@ -192,6 +192,11 @@ public class InventoryTracker
     private void handleItemRemoved(int itemId, int quantity)
     {
         if (!supabase.isProfileReady()) return;
+        // Bank/GE open → item leaving inventory is a deposit or sale, not a drop.
+        // BankTracker handles bank changes; GETracker handles sales.
+        if (client.getWidget(BANK_WIDGET_GROUP_ID, 0) != null) return;
+        if (client.getWidget(GE_WIDGET_GROUP_ID,   0) != null) return;
+
         // Cash: only track explicit drops. Bank deposits / spending are handled by BankTracker.
         if (itemId == COINS_ID)
         {
