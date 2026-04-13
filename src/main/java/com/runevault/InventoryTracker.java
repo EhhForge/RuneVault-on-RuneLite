@@ -36,11 +36,11 @@ public class InventoryTracker
     private boolean pendingPickup = false;
     private int pendingPickupItemId = -1;
 
-    // Track if the next inventory change was caused by a drop action.
-    // A Set handles rapid shift+click drops where multiple MenuOptionClicked events
-    // fire before a single ItemContainerChanged, overwriting a single int would lose items.
+    // Track pending drops: itemId → count of pending drops.
+    // A Map handles rapid shift+click of the same item — a Set would collapse
+    // multiple drops of the same item ID into one and miss the rest.
     private boolean pendingDrop = false;
-    private final java.util.Set<Integer> pendingDropItemIds = new java.util.HashSet<>();
+    private final java.util.Map<Integer, Integer> pendingDropCounts = new java.util.HashMap<>();
 
     // Last known equipment snapshot — used to avoid redundant re-uploads
     private final Map<Integer, Integer> lastEquipment = new HashMap<>();
@@ -64,7 +64,7 @@ public class InventoryTracker
         if ("Drop".equalsIgnoreCase(event.getMenuOption()))
         {
             pendingDrop = true;
-            pendingDropItemIds.add(event.getItemId());
+            pendingDropCounts.merge(event.getItemId(), 1, Integer::sum);
         }
 
         if ("Take".equalsIgnoreCase(event.getMenuOption()))
@@ -195,9 +195,12 @@ public class InventoryTracker
         // Cash: only track explicit drops. Bank deposits / spending are handled by BankTracker.
         if (itemId == COINS_ID)
         {
-            if (config.syncCash() && pendingDrop && pendingDropItemIds.remove(COINS_ID))
+            if (config.syncCash() && pendingDrop && pendingDropCounts.containsKey(COINS_ID))
             {
-                if (pendingDropItemIds.isEmpty()) pendingDrop = false;
+                int remaining = pendingDropCounts.get(COINS_ID) - 1;
+                if (remaining <= 0) pendingDropCounts.remove(COINS_ID);
+                else pendingDropCounts.put(COINS_ID, remaining);
+                if (pendingDropCounts.isEmpty()) pendingDrop = false;
                 supabase.adjustCash(-quantity);
             }
             return;
@@ -208,9 +211,12 @@ public class InventoryTracker
         // Only act on explicit drops (not inventory rearrangement, equipping, etc.)
         // Remove per-item from the Set — global clear in onItemContainerChanged would wipe
         // remaining entries before subsequent IC events fire (one IC per shift+click drop).
-        if (pendingDrop && pendingDropItemIds.remove(itemId))
+        if (pendingDrop && pendingDropCounts.containsKey(itemId))
         {
-            if (pendingDropItemIds.isEmpty()) pendingDrop = false;
+            int remaining = pendingDropCounts.get(itemId) - 1;
+            if (remaining <= 0) pendingDropCounts.remove(itemId);
+            else pendingDropCounts.put(itemId, remaining);
+            if (pendingDropCounts.isEmpty()) pendingDrop = false;
             int canonicalId = itemManager.canonicalize(itemId);
             String itemName = itemManager.getItemComposition(canonicalId).getName();
             log.debug("[RuneVault] Dropped: " + quantity + "x " + itemName);
@@ -312,7 +318,7 @@ public class InventoryTracker
         pendingPickup = false;
         pendingPickupItemId = -1;
         pendingDrop = false;
-        pendingDropItemIds.clear();
+        pendingDropCounts.clear();
     }
 
     private Map<Integer, Integer> buildMap(ItemContainer container)

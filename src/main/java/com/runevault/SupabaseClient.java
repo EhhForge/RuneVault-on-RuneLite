@@ -587,239 +587,64 @@ public class SupabaseClient
     // -------------------------------------------------------------------------
 
     /**
-     * Upsert a GE-purchased item with weighted average cost.
+     * Atomically increments an item's quantity for skill gains and ground pickups.
+     * Uses an RPC so concurrent rapid gains don't race — no client-side read needed.
+     * If a bank-authoritative row (source=runelite/runelite_equip) already exists,
+     * the RPC only updates last_added_at (bank scan quantity is the source of truth).
      */
     public void upsertItem(PortfolioItem item)
-    {
-        upsertItem(item, 2);
-    }
-
-    private void upsertItem(PortfolioItem item, int retriesLeft)
     {
         if (!ensureAuthenticated()) return;
         if (!hasProfile()) { log("upsertItem skipped — no profile loaded yet"); return; }
 
-        // Fetch the single row for this item (no source filter — single-row architecture).
-        Request fetchRequest = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items"
-                + "?user_id=eq." + getUserId()
-                + "&profile_id=eq." + cachedProfileId
-                + "&item_id=eq." + item.getItemId()
-                + "&game=eq.osrs"
-                + "&select=id,quantity,buy_price,source")
-            .get()
-            .addHeader("apikey", ANON_KEY)
-            .addHeader("Authorization", "Bearer " + config.authToken())
-            .build();
-
-        httpClient.newCall(fetchRequest).enqueue(new Callback()
-        {
-            @Override
-            public void onFailure(Call call, IOException e)
-            {
-                if (retriesLeft > 0)
-                {
-                    int attempt = 3 - retriesLeft;
-                    log("upsertItem fetch error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
-                    retryScheduler.schedule(() -> upsertItem(item, retriesLeft - 1), attempt, java.util.concurrent.TimeUnit.SECONDS);
-                }
-                else
-                {
-                    log("upsertItem fetch failed after all retries: " + e.getMessage());
-                }
-            }
-
-            @Override
-            public void onResponse(Call call, Response response) throws IOException
-            {
-                try {
-                    if (!response.isSuccessful() || response.body() == null)
-                    {
-                        doUpsertItem(item, item.getQuantity(), item.getBuyPrice());
-                        return;
-                    }
-
-                    JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
-                    if (rows.size() == 0)
-                    {
-                        // No existing row — insert fresh purchase row.
-                        doUpsertItem(item, item.getQuantity(), item.getBuyPrice());
-                    }
-                    else
-                    {
-                        JsonObject row   = rows.get(0).getAsJsonObject();
-                        String rowSource = row.has("source") && !row.get("source").isJsonNull()
-                            ? row.get("source").getAsString() : "";
-
-                        if ("runelite".equals(rowSource) || "runelite_equip".equals(rowSource))
-                        {
-                            // Bank-authoritative row exists. Don't touch quantity — bank scan
-                            // is the source of truth. Only update last_added_at so the item
-                            // appears in the "Latest Added" section.
-                            String rowId = row.get("id").getAsString();
-                            touchLastAddedAt(rowId, item.getItemName());
-                        }
-                        else
-                        {
-                            // Purchase/drop row — accumulate quantity with weighted avg price.
-                            long existingQty   = row.get("quantity").getAsLong();
-                            long existingPrice = row.get("buy_price").getAsLong();
-                            long newQty        = existingQty + item.getQuantity();
-                            long avgPrice      = ((long) existingQty * existingPrice + (long) item.getQuantity() * item.getBuyPrice()) / newQty;
-                            doUpsertItem(item, newQty, avgPrice);
-                        }
-                    }
-                } finally {
-                    response.close();
-                }
-            }
-        });
-    }
-
-    /**
-     * Updates only last_added_at on an existing row (e.g. skill gain when a bank-scan
-     * row already owns the item). Keeps quantity and source intact.
-     */
-    private void touchLastAddedAt(String rowId, String itemName)
-    {
         JsonObject body = new JsonObject();
-        body.addProperty("last_added_at", System.currentTimeMillis());
+        body.addProperty("p_user_id",    getUserId());
+        body.addProperty("p_profile_id", cachedProfileId);
+        body.addProperty("p_item_id",    item.getItemId());
+        body.addProperty("p_game",       "osrs");
+        body.addProperty("p_item_name",  item.getItemName());
+        body.addProperty("p_delta",      (long) item.getQuantity());
+        if (item.getImageUrl() != null)
+            body.addProperty("p_image_url", item.getImageUrl());
+        else
+            body.add("p_image_url", com.google.gson.JsonNull.INSTANCE);
 
         Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items?id=eq." + rowId)
-            .patch(RequestBody.create(JSON, gson.toJson(body)))
-            .addHeader("apikey",         ANON_KEY)
-            .addHeader("Authorization",  "Bearer " + config.authToken())
-            .addHeader("Content-Type",   "application/json")
-            .addHeader("Prefer",         "return=minimal")
-            .build();
-
-        executeAsync(request, "touchLastAddedAt(" + itemName + ")");
-    }
-
-    private void doUpsertItem(PortfolioItem item, long quantity, long buyPrice)
-    {
-        String nowIso = java.time.Instant.now().toString();
-        long nowMs    = System.currentTimeMillis();
-
-        JsonObject body = new JsonObject();
-        body.addProperty("id",            java.util.UUID.randomUUID().toString());
-        body.addProperty("user_id",       getUserId());
-        body.addProperty("profile_id",    cachedProfileId);
-        body.addProperty("item_id",       item.getItemId());
-        body.addProperty("item_name",     item.getItemName());
-        body.addProperty("game",          "osrs");
-        body.addProperty("quantity",      quantity);
-        body.addProperty("buy_price",     buyPrice);
-        body.addProperty("buy_date",      nowIso);
-        body.addProperty("last_added_at", nowMs);
-        body.addProperty("watchlisted",   false);
-        body.addProperty("source",        "purchase");
-        if (item.getImageUrl() != null) body.addProperty("image_url", item.getImageUrl());
-
-        Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items?on_conflict=user_id,profile_id,item_id,game")
+            .url(SUPABASE_URL + "/rest/v1/rpc/increment_portfolio_item")
             .post(RequestBody.create(JSON, gson.toJson(body)))
-            .addHeader("apikey",         ANON_KEY)
-            .addHeader("Authorization",  "Bearer " + config.authToken())
-            .addHeader("Content-Type",   "application/json")
-            .addHeader("Prefer",         "resolution=merge-duplicates,return=minimal")
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .addHeader("Content-Type",  "application/json")
             .build();
 
         executeAsync(request, "upsertItem(" + item.getItemName() + ")");
     }
 
     /**
-     * Decrement quantity of an item. Deletes row if quantity reaches 0.
+     * Atomically decrements an item's quantity for drops. Deletes the row if
+     * quantity reaches 0. Uses an RPC so concurrent rapid drops don't race.
      */
     public void decrementItem(int itemId, int quantityToRemove)
     {
-        decrementItem(itemId, quantityToRemove, 2);
-    }
-
-    private void decrementItem(int itemId, int quantityToRemove, int retriesLeft)
-    {
         if (!ensureAuthenticated()) return;
+        if (!hasProfile()) { log("decrementItem skipped — no profile loaded yet"); return; }
 
-        Request fetchRequest = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items"
-                + "?user_id=eq." + getUserId()
-                + "&profile_id=eq." + cachedProfileId
-                + "&item_id=eq." + itemId
-                + "&game=eq.osrs"
-                + "&select=id,quantity")
-            .get()
-            .addHeader("apikey",        ANON_KEY)
-            .addHeader("Authorization", "Bearer " + config.authToken())
-            .build();
-
-        httpClient.newCall(fetchRequest).enqueue(new Callback()
-        {
-            @Override
-            public void onFailure(Call call, IOException e)
-            {
-                if (retriesLeft > 0)
-                {
-                    int attempt = 3 - retriesLeft;
-                    log("decrementItem fetch error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
-                    retryScheduler.schedule(() -> decrementItem(itemId, quantityToRemove, retriesLeft - 1), attempt, java.util.concurrent.TimeUnit.SECONDS);
-                }
-                else
-                {
-                    log("decrementItem fetch failed after all retries: " + e.getMessage());
-                }
-            }
-
-            @Override
-            public void onResponse(Call call, Response response) throws IOException
-            {
-                try {
-                    if (!response.isSuccessful() || response.body() == null) return;
-
-                    JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
-                    if (rows.size() == 0) return;
-
-                    JsonObject row   = rows.get(0).getAsJsonObject();
-                    String rowId     = row.get("id").getAsString();
-                    int currentQty   = row.get("quantity").getAsInt();
-                    int newQty       = currentQty - quantityToRemove;
-
-                    if (newQty <= 0) deleteItem(rowId);
-                    else             updateQuantity(rowId, newQty);
-                } finally {
-                    response.close();
-                }
-            }
-        });
-    }
-
-    private void updateQuantity(String rowId, int newQuantity)
-    {
         JsonObject body = new JsonObject();
-        body.addProperty("quantity", newQuantity);
+        body.addProperty("p_user_id",    getUserId());
+        body.addProperty("p_profile_id", cachedProfileId);
+        body.addProperty("p_item_id",    itemId);
+        body.addProperty("p_game",       "osrs");
+        body.addProperty("p_delta",      quantityToRemove);
 
         Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items?id=eq." + rowId)
-            .patch(RequestBody.create(JSON, gson.toJson(body)))
+            .url(SUPABASE_URL + "/rest/v1/rpc/decrement_portfolio_item")
+            .post(RequestBody.create(JSON, gson.toJson(body)))
             .addHeader("apikey",        ANON_KEY)
             .addHeader("Authorization", "Bearer " + config.authToken())
             .addHeader("Content-Type",  "application/json")
-            .addHeader("Prefer",        "return=minimal")
             .build();
 
-        executeAsync(request, "updateQuantity");
-    }
-
-    private void deleteItem(String rowId)
-    {
-        Request request = new Request.Builder()
-            .url(SUPABASE_URL + "/rest/v1/portfolio_items?id=eq." + rowId)
-            .delete()
-            .addHeader("apikey",        ANON_KEY)
-            .addHeader("Authorization", "Bearer " + config.authToken())
-            .build();
-
-        executeAsync(request, "deleteItem");
+        executeAsync(request, "decrementItem(" + itemId + ", -" + quantityToRemove + ")");
     }
 
     public void updateCash(long amount)
