@@ -210,11 +210,10 @@ public class BankTracker
     {
         if (!supabase.isProfileReady())
         {
-            // Reset the scan guard so the player can close and reopen the bank to retry
-            // once profile resolution completes (usually within 1-2s of login).
-            bankScannedThisOpen = false;
-            log.warn("[RuneVault] Bank sync skipped — profile not yet confirmed for this character.");
-            chatMessage.accept("<col=ff6060>Bank sync skipped</col> \u2014 still loading your character. Close and reopen the bank to sync.");
+            // Profile isn't confirmed yet — queue the scan and apply it automatically
+            // once switchProfileForUsername() completes (usually within 1-2s of login).
+            log.info("[RuneVault] Bank sync queued — profile not yet confirmed, will auto-apply when ready.");
+            supabase.queueForProfileReady(() -> syncItems(result, bankCoins));
             return;
         }
 

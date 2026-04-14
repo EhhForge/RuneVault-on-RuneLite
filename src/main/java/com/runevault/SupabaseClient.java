@@ -48,6 +48,13 @@ public class SupabaseClient
 
     public boolean isProfileReady() { return profileReady; }
 
+    /** Enqueue an action to run as soon as the profile is confirmed. */
+    public void queueForProfileReady(Runnable action)
+    {
+        if (profileReady) action.run();
+        else profileReadyQueue.offer(action);
+    }
+
     private void drainProfileReadyQueue()
     {
         Runnable r;
