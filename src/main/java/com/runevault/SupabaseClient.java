@@ -41,7 +41,20 @@ public class SupabaseClient
     // Prevents bank/inventory syncs from firing against the wrong profile during startup.
     private volatile boolean profileReady = false;
 
+    // Events (logActivity, decrementItem) that arrived before the profile was ready.
+    // Drained in order as soon as profileReady flips to true.
+    private final java.util.Queue<Runnable> profileReadyQueue =
+        new java.util.concurrent.ConcurrentLinkedQueue<>();
+
     public boolean isProfileReady() { return profileReady; }
+
+    private void drainProfileReadyQueue()
+    {
+        Runnable r;
+        int count = 0;
+        while ((r = profileReadyQueue.poll()) != null) { r.run(); count++; }
+        if (count > 0) log("Drained " + count + " queued event(s) after profile ready");
+    }
 
     // Fired when the session is permanently lost (refresh token expired / revoked).
     // The plugin uses this to update the panel and show a chat message.
@@ -202,6 +215,7 @@ public class SupabaseClient
             {
                 cachedProfileId = lastProfileId;
                 profileReady = true; // safe — this is the profile we last verified
+                drainProfileReadyQueue();
                 log("Restored last profile: " + cachedProfileId);
                 fetchAndCacheCash(); // pre-warm coin tracking
                 setPluginActive(true); // show connected immediately in the app
@@ -685,7 +699,13 @@ public class SupabaseClient
     public void logActivity(PortfolioItem item, String activitySource)
     {
         if (!ensureAuthenticated()) return;
-        if (!hasProfile()) { log("logActivity skipped — no profile loaded yet"); return; }
+        if (!hasProfile()) {
+            final PortfolioItem qItem = item;
+            final String qSource = activitySource;
+            profileReadyQueue.offer(() -> logActivity(qItem, qSource));
+            log("logActivity queued — profile not yet ready (" + item.getItemName() + " [" + activitySource + "])");
+            return;
+        }
 
         JsonObject body = new JsonObject();
         body.addProperty("p_user_id",    getUserId());
@@ -718,7 +738,13 @@ public class SupabaseClient
     public void decrementItem(int itemId, int quantityToRemove)
     {
         if (!ensureAuthenticated()) return;
-        if (!hasProfile()) { log("decrementItem skipped — no profile loaded yet"); return; }
+        if (!hasProfile()) {
+            final int qItemId = itemId;
+            final int qQty = quantityToRemove;
+            profileReadyQueue.offer(() -> decrementItem(qItemId, qQty));
+            log("decrementItem queued — profile not yet ready (itemId=" + itemId + ")");
+            return;
+        }
 
         JsonObject body = new JsonObject();
         body.addProperty("p_user_id",    getUserId());
@@ -1051,6 +1077,7 @@ public class SupabaseClient
         if (cachedProfileId != null)
         {
             profileReady = true;
+            drainProfileReadyQueue();
             setPluginActive(true); // now that we have the correct profile, mark as active in the app
         }
     }
