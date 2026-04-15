@@ -229,6 +229,34 @@ public class BankTracker
         final java.util.Set<Integer> bankItemIds = new java.util.HashSet<>();
         for (PortfolioItem item : result.items) bankItemIds.add(item.getItemId());
 
+        // Build a "safe" set: bank items + currently equipped items + inventory items.
+        // Equipped/inventory items may still have source='runelite' in the DB if the
+        // equipment upsert (source='runelite_equip') hasn't landed yet — without this
+        // guard they'd be incorrectly deleted by removeItemsMissingFromBank.
+        final java.util.Set<Integer> safeItemIds = new java.util.HashSet<>(bankItemIds);
+        net.runelite.api.ItemContainer equipContainer = client.getItemContainer(net.runelite.api.InventoryID.EQUIPMENT);
+        if (equipContainer != null)
+        {
+            for (net.runelite.api.Item item : equipContainer.getItems())
+            {
+                if (item.getId() <= 0) continue;
+                int canonicalId = itemManager.canonicalize(item.getId());
+                if (canonicalId > 0) safeItemIds.add(canonicalId);
+            }
+        }
+        net.runelite.api.ItemContainer invContainer = client.getItemContainer(net.runelite.api.InventoryID.INVENTORY);
+        if (invContainer != null)
+        {
+            for (net.runelite.api.Item item : invContainer.getItems())
+            {
+                if (item.getId() <= 0) continue;
+                int canonicalId = itemManager.canonicalize(item.getId());
+                if (canonicalId > 0) safeItemIds.add(canonicalId);
+            }
+        }
+        log.debug("[RuneVault] removeItemsMissingFromBank safe set: {} bank + {} equipment/inventory",
+            bankItemIds.size(), safeItemIds.size() - bankItemIds.size());
+
         // Chain removeItemsMissingFromBank as the upsert's onSuccess callback so it only
         // runs AFTER the upsert has landed in the DB — prevents the race where deletes
         // fire before inserts complete and cause items to temporarily vanish in the app.
@@ -250,7 +278,13 @@ public class BankTracker
                         thisGeneration, bankScanGeneration);
                     return;
                 }
-                supabase.removeItemsMissingFromBank(bankItemIds);
+                supabase.removeItemsMissingFromBank(safeItemIds);
+                // Clean up runelite_equip rows for items no longer in bank, equipment, or
+                // inventory — covers gear that was equipped, then lost/died/traded without
+                // being explicitly deleted by InventoryTracker. We no longer delete equip rows
+                // immediately on unequip (to avoid value-drop gaps), so this is the cleanup
+                // point. safeItemIds = bank + equipment + inventory, so active items are safe.
+                supabase.clearStaleEquipmentRows(safeItemIds);
                 notifyUser.run();
             };
         }

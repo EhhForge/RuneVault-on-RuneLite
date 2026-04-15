@@ -917,6 +917,86 @@ public class SupabaseClient
         removeItemsMissingFromBank(bankItemIds, 2);
     }
 
+    /**
+     * Deletes all source="runelite_equip" rows for items NOT in safeItemIds.
+     * safeItemIds = bank items + currently equipped items + inventory items.
+     *
+     * Called after every bank scan (when bankRemoveMissing is on) to lazily
+     * clean up stale equipment rows — gear that was equipped in a previous
+     * session and is no longer in the player's bank, equipment, or inventory.
+     *
+     * We no longer delete equip rows immediately on unequip because that
+     * created a guaranteed gap (value drop) before the bank scan could
+     * restore them as source="runelite". Lazy cleanup here has no gap:
+     * the bank upsert has already landed before this fires.
+     */
+    public void clearStaleEquipmentRows(java.util.Set<Integer> safeItemIds)
+    {
+        if (!ensureAuthenticated() || !hasProfile()) return;
+
+        // If nothing is safe to keep, skip — this shouldn't happen during a normal bank scan
+        // but avoids accidentally wiping all equipment rows on an empty-inventory edge case.
+        if (safeItemIds.isEmpty()) return;
+
+        // Fetch all runelite_equip rows for this profile
+        Request fetchRequest = new Request.Builder()
+            .url(SUPABASE_URL + "/rest/v1/portfolio_items"
+                + "?user_id=eq." + getUserId()
+                + "&profile_id=eq." + cachedProfileId
+                + "&source=eq.runelite_equip"
+                + "&game=eq.osrs"
+                + "&select=id,item_id")
+            .get()
+            .addHeader("apikey",        ANON_KEY)
+            .addHeader("Authorization", "Bearer " + config.authToken())
+            .build();
+
+        httpClient.newCall(fetchRequest).enqueue(new Callback()
+        {
+            @Override
+            public void onFailure(Call call, IOException e)
+            {
+                log("clearStaleEquipmentRows fetch error: " + e.getMessage());
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException
+            {
+                try {
+                    if (!response.isSuccessful() || response.body() == null) return;
+                    JsonArray rows = gson.fromJson(response.body().string(), JsonArray.class);
+
+                    java.util.List<String> staleIds = new java.util.ArrayList<>();
+                    for (int i = 0; i < rows.size(); i++)
+                    {
+                        JsonObject row = rows.get(i).getAsJsonObject();
+                        int itemId = row.get("item_id").getAsInt();
+                        if (!safeItemIds.contains(itemId))
+                        {
+                            staleIds.add(row.get("id").getAsString());
+                            log.info("[RuneVault][StaleEquip] DELETE item_id={} (not in bank/equipment/inventory)", itemId);
+                        }
+                    }
+
+                    if (!staleIds.isEmpty())
+                    {
+                        String idList = String.join(",", staleIds);
+                        Request deleteRequest = new Request.Builder()
+                            .url(SUPABASE_URL + "/rest/v1/portfolio_items?id=in.(" + idList + ")")
+                            .delete()
+                            .addHeader("apikey",        ANON_KEY)
+                            .addHeader("Authorization", "Bearer " + config.authToken())
+                            .addHeader("Prefer",        "return=minimal")
+                            .build();
+                        executeAsync(deleteRequest, "clearStaleEquipmentRows(" + staleIds.size() + " stale rows)");
+                    }
+                } finally {
+                    response.close();
+                }
+            }
+        });
+    }
+
     private void removeItemsMissingFromBank(java.util.Set<Integer> bankItemIds, int retriesLeft)
     {
         if (!ensureAuthenticated() || !hasProfile()) return;

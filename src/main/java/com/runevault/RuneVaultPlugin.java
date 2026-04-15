@@ -376,10 +376,13 @@ public class RuneVaultPlugin extends Plugin
             {
                 // Player logged out, is on the loading/connecting screen, or lost connection —
                 // turn off the green dot in the app and stop heartbeats until they fully log in.
-                // Clear equipped items (they're ephemeral — player is no longer wearing them).
                 // Profile will be re-resolved when they log in again via switchProfileForUsername.
+                // NOTE: We intentionally do NOT clear runelite_equip rows here. Permanently-worn
+                // items (fire cape, slayer helm, berserker ring (i)) appear as bank placeholders
+                // and are never re-added by bank scan, so clearing them would cause permanent
+                // portfolio value loss. Stale equipment rows are cleaned up lazily by
+                // clearStaleEquipmentRows() after the next bank scan lands.
                 linkCodePoller.execute(() -> {
-                    supabase.clearEquipmentItems();
                     supabase.onPlayerLogout();
                 });
             }
@@ -462,8 +465,6 @@ public class RuneVaultPlugin extends Plugin
     {
         if (!supabase.isAuthenticated()) return;
         bankTracker.onWidgetLoaded(event);
-        if (event.getGroupId() == BankTracker.BANK_WIDGET_GROUP_ID)
-            inventoryTracker.onBankOpened();
     }
 
     // -------------------------------------------------------------------------
