@@ -11,7 +11,7 @@ package com.runevault;
 public final class RuneVaultBuildConfig
 {
     public static final String SUPABASE_URL      = "https://lxpbozteorpijrowhubl.supabase.co";
-    public static final String SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx4cGJvenRlb3JwaWpyb3dodWJsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQwOTIxODUsImV4cCI6MjA4OTY2ODE4NX0.24lluvW8BjkhCl9ezLYyAVOev1ILOG9k9mqJTxf8MBU";
+    public static final String SUPABASE_ANON_KEY = "sb_publishable__K0u7EoZTfXWZQyNwSF55g_XI0R4vZB";
 
     private RuneVaultBuildConfig() {}
 }
