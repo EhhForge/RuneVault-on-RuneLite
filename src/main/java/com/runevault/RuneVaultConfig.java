@@ -152,7 +152,7 @@ public interface RuneVaultConfig extends Config
     )
     default boolean bankScanEnabled()
     {
-        return false;
+        return true;
     }
 
     @ConfigItem(keyName = "bankScanEnabled", name = "", description = "")

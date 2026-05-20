@@ -97,6 +97,7 @@ public class BankTracker
         log.debug("[RuneVault] onWidgetLoaded groupId={} bankScanEnabled={} scannedThisOpen={}",
             event.getGroupId(), config.bankScanEnabled(), bankScannedThisOpen);
         if (!config.bankScanEnabled()) return;
+        if (!supabase.isAuthenticated()) return;
         if (event.getGroupId() == BANK_WIDGET_GROUP_ID)
         {
             if (bankScannedThisOpen)
