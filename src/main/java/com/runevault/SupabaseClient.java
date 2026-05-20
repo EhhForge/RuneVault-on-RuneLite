@@ -9,6 +9,9 @@ import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
 
 import java.io.IOException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 public class SupabaseClient
@@ -17,6 +20,18 @@ public class SupabaseClient
     private static final String ANON_KEY     = RuneVaultBuildConfig.SUPABASE_ANON_KEY;
     private static final String EDGE_URL     = SUPABASE_URL + "/functions/v1/ge-prices";
     private static final MediaType JSON      = MediaType.get("application/json; charset=utf-8");
+
+    // Daemon scheduler for retry backoff. Sleeping inside an OkHttp callback
+    // pins a dispatcher thread; under retry storms (Supabase down, network
+    // blip) all dispatcher slots can park and starve real requests. Schedule
+    // the re-attempt and return immediately instead.
+    private static final ScheduledExecutorService retryScheduler =
+        Executors.newSingleThreadScheduledExecutor(r ->
+        {
+            Thread t = new Thread(r, "RuneVault-RetryScheduler");
+            t.setDaemon(true);
+            return t;
+        });
 
     private final OkHttpClient httpClient;
     private final Gson gson;
@@ -609,8 +624,7 @@ public class SupabaseClient
                 {
                     int attempt = 3 - retriesLeft;
                     log("upsertItem fetch error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
-                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    upsertItem(item, retriesLeft - 1);
+                    retryScheduler.schedule(() -> upsertItem(item, retriesLeft - 1), attempt * 1000L, TimeUnit.MILLISECONDS);
                 }
                 else
                 {
@@ -714,8 +728,7 @@ public class SupabaseClient
                 {
                     int attempt = 3 - retriesLeft;
                     log("decrementItem fetch error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
-                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    decrementItem(itemId, quantityToRemove, retriesLeft - 1);
+                    retryScheduler.schedule(() -> decrementItem(itemId, quantityToRemove, retriesLeft - 1), attempt * 1000L, TimeUnit.MILLISECONDS);
                 }
                 else
                 {
@@ -905,8 +918,7 @@ public class SupabaseClient
                 {
                     int attempt = 3 - retriesLeft;
                     log("removeItemsMissingFromBank error (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
-                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    removeItemsMissingFromBank(bankItemIds, retriesLeft - 1);
+                    retryScheduler.schedule(() -> removeItemsMissingFromBank(bankItemIds, retriesLeft - 1), attempt * 1000L, TimeUnit.MILLISECONDS);
                 }
                 else
                 {
@@ -938,16 +950,22 @@ public class SupabaseClient
 
                     if (!missingIds.isEmpty())
                     {
-                        // Single batch DELETE using Supabase `in` filter
-                        String idList = String.join(",", missingIds);
-                        Request deleteRequest = new Request.Builder()
-                            .url(SUPABASE_URL + "/rest/v1/portfolio_items?id=in.(" + idList + ")")
-                            .delete()
-                            .addHeader("apikey",        ANON_KEY)
-                            .addHeader("Authorization", "Bearer " + config.authToken())
-                            .addHeader("Prefer",        "return=minimal")
-                            .build();
-                        executeAsync(deleteRequest, "removeItemsMissingFromBank(" + missingIds.size() + " items)");
+                        // Chunked DELETE using Supabase `in` filter. PostgREST URL length cap
+                        // is ~8KB; ~150 UUIDs (36 chars + comma) per chunk stays well under.
+                        final int CHUNK = 150;
+                        for (int from = 0; from < missingIds.size(); from += CHUNK)
+                        {
+                            java.util.List<String> chunk = missingIds.subList(from, Math.min(from + CHUNK, missingIds.size()));
+                            String idList = String.join(",", chunk);
+                            Request deleteRequest = new Request.Builder()
+                                .url(SUPABASE_URL + "/rest/v1/portfolio_items?id=in.(" + idList + ")")
+                                .delete()
+                                .addHeader("apikey",        ANON_KEY)
+                                .addHeader("Authorization", "Bearer " + config.authToken())
+                                .addHeader("Prefer",        "return=minimal")
+                                .build();
+                            executeAsync(deleteRequest, "removeItemsMissingFromBank(" + chunk.size() + " items)");
+                        }
                     }
                 } finally {
                     response.close();
@@ -1335,8 +1353,7 @@ public class SupabaseClient
                 {
                     int attempt = 3 - retriesLeft;
                     log(label + " failed (attempt " + attempt + "): " + e.getMessage() + " — retrying...");
-                    try { Thread.sleep(attempt * 1000L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    executeAsync(request, label, onSuccess, retriesLeft - 1);
+                    retryScheduler.schedule(() -> executeAsync(request, label, onSuccess, retriesLeft - 1), attempt * 1000L, TimeUnit.MILLISECONDS);
                 }
                 else
                 {
