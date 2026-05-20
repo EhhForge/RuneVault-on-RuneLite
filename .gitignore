@@ -40,3 +40,7 @@ local.properties.example
 
 # Icon staging — goes to plugin-hub repo, not here
 dist-icons/
+
+# AI assistant context + local dev scripts (local-only)
+CLAUDE.md
+bootstrap.sh
