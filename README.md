@@ -20,9 +20,9 @@ Rune Vault is a portfolio tracker for Old School RuneScape. This plugin connects
 ## How It Works
 
 1. Install the Rune Vault plugin from the Plugin Hub
-2. Open the Rune Vault side panel in RuneLite (look for the icon in the sidebar)
-3. In the Rune Vault app, go to **Settings → Link RuneLite Plugin** to generate a 6-character link code
-4. Enter the code in the plugin panel and click **Link**
+2. Open the Rune Vault side panel in RuneLite (look for the gold "RV" icon in the sidebar)
+3. In the Rune Vault app, go to **Settings → Connect RuneLite Plugin** to generate a 6-character link code
+4. Enter the code in the plugin panel and click **Connect**
 5. The plugin is now linked — open your bank to trigger the first sync
 
 Once linked, the plugin runs silently in the background. Your portfolio updates automatically as you play.
@@ -31,10 +31,31 @@ Once linked, the plugin runs silently in the background. Your portfolio updates 
 
 ## Configuration
 
-| Option | Description |
-|---|---|
-| Bank Sync Mode | `Auto` syncs on every bank open. `Prompt` asks each time. `Disabled` turns off bank sync. |
-| Debug Logging | Enables verbose logs in the RuneLite console for troubleshooting. Off by default. |
+All settings live under **RuneLite → Plugin config → Rune Vault**, and the most-used toggles are mirrored in the side panel.
+
+**Sync Features**
+
+| Option | Default | Description |
+|---|---|---|
+| Sync GE Trades | On | Adds bought items / removes sold items on GE completion |
+| Track Item Pickups | On | Adds items picked up off the ground |
+| Track Drops & Sales | On | Removes items dropped or sold |
+| Sync Cash Stack | On | Keeps your coin total updated (bank + inventory) |
+
+**Bank Scanning**
+
+| Option | Default | Description |
+|---|---|---|
+| Enable Bank Scan | On | Scans your bank when you open it |
+| Scan Mode | Prompt | `Prompt` asks before syncing each session, `Auto` syncs silently |
+| Overwrite Duplicates | On | Updates quantity/icon of existing portfolio items |
+| Remove Missing Items | Off | Removes portfolio items no longer in your bank (destructive — opt-in) |
+
+**Advanced**
+
+| Option | Default | Description |
+|---|---|---|
+| Debug Logging | Off | Verbose console logs for troubleshooting |
 
 ---
 
@@ -62,17 +83,14 @@ All data is sent over HTTPS to a private backend. No data is shared with third p
 
 ## Building from Source
 
-Prerequisites: JDK 11+, Gradle
+Prerequisites: JDK 11+ (Gradle wrapper is included).
 
 ```bash
-# Copy and fill in your credentials
-cp local.properties.example local.properties
+# Launch RuneLite with the plugin loaded (development)
+./gradlew run
 
-# Run inside RuneLite client (for development)
-./gradlew runClient
-
-# Build the JAR
+# Build the plugin JAR
 ./gradlew build
 ```
 
-`local.properties` is gitignored and must never be committed — it contains your Supabase project credentials.
+The Supabase backend URL and public anonymous key are compiled into the plugin (same pattern as a web or mobile app — these are designed-public values, and access is enforced server-side by Row-Level Security).

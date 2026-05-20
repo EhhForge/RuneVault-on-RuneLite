@@ -37,3 +37,6 @@ run-dev.bat
 install.bat
 make-dist.sh
 local.properties.example
+
+# Icon staging — goes to plugin-hub repo, not here
+dist-icons/
